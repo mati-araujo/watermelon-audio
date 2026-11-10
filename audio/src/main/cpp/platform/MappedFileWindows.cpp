@@ -34,9 +34,11 @@ MappedFile MappedFile::mapPath(const char* utf8Path) {
         return result;
     }
 
-    // FILE_SHARE_READ only (no WRITE, no DELETE): fails closed if another process has the file open for
-    // writing, so the bytes cannot change under the view. Truncating a mapped file is already refused by
-    // Windows itself (ERROR_USER_MAPPED_FILE); the share mode is not what prevents that.
+    // FILE_SHARE_READ only (no WRITE, no DELETE): fails closed if another process already has the file
+    // open for writing. It only guards the open: the handle is closed right after CreateFileMappingW and
+    // the share mode dies with it, so another process can write into the file afterwards and the view
+    // sees it (same as POSIX mmap). Truncating a mapped file is refused by Windows itself
+    // (ERROR_USER_MAPPED_FILE); the share mode is not what prevents that.
     const HANDLE file = ::CreateFileW(wide.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {

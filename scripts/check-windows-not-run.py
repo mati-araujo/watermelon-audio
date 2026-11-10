@@ -17,33 +17,44 @@ forma, sin tipo, es `Suite.Test | razon`):
                                       no la asercion
   ambiente | <prefijo> | razon        un skip de AMBIENTE (corpus ausente, GeneralUser, Release-only...):
                                       el prefijo EXACTO del mensaje del GTEST_SKIP
-  cmake | ruta/CMakeLists.txt | razon  un CMake de tests con una exclusion/condicion de plataforma
+  cmake | ruta | construccion | razon  UN hallazgo de CMake: un archivo de tests y la construccion
+                                      normalizada (`if(WIN32) => return()`), no el archivo entero
+  fuera | ruta | condicion | razon     UN `#if` de plataforma FUERA de los cuerpos de TEST (include, helper,
+                                      constante, macro): `if defined(_WIN32)`; sin numeros de linea; si la
+                                      misma condicion aparece N veces en el archivo, N entradas
+  deshabilitado | Suite.Test | razon  un TEST con prefijo DISABLED_ (no corre en ninguna plataforma)
   solo-windows | Suite.Test o archivo.cpp | razon   test (o fuente) que existe SOLO en Windows
 
 REGLAS ESTATICAS (corren en cualquier SO)
   E1  el conjunto de tests que usan la macro == las entradas `Suite.Test | razon`.
   E2a ningun TEST/TEST_F/TEST_P/TYPED_TEST*/INSTANTIATE_* se registra dentro de un bloque #if/#ifdef/
       #ifndef/#elif (ni su #else) cuya condicion nombra una macro de plataforma (_WIN32, __APPLE__,
-      __linux__, TARGET_OS_*...): existiria en una plataforma y en otra no. Excepcion: `solo-windows`.
+      __linux__, TARGET_OS_*, GTEST_OS_*...): existiria en una plataforma y en otra no. Excepcion: `solo-windows`.
   E2b un `#if` sobre una macro de plataforma DENTRO del cuerpo de un TEST exige que el cuerpo empiece
       con la macro (y entonces es un test declarado) o que el test este en `variante`. Trinquete en las
       dos direcciones: una `variante` que ya no tiene tal `#if` sobra.
-  E2c un TEST con prefijo DISABLED_ es un test que no corre sin declarar.
-  E3  ningun CMake de tests excluye fuentes ni targets de test ni corta la configuracion (`return()`)
-      bajo un if() sobre WIN32/UNIX/APPLE/MINGW/MSVC/CMAKE_SYSTEM_NAME..., ni usa DISABLED/TEST_FILTER/
-      gtest_filter, salvo el archivo declarado `cmake`. Una declaracion `cmake`/`solo-windows` que ya no
-      se usa sobra.
+  E2c un TEST con prefijo DISABLED_ es un test que no corre: exige `deshabilitado` (y sobra si ya no esta).
+  E2d INVENTARIO: todo `#if/#ifdef/#ifndef/#elif` con macro de plataforma FUERA de los cuerpos de TEST (en
+      toda fuente de tests, incluida tests/support) esta declarado `fuera`, en las dos direcciones. Un
+      `#define SKIPW() return` bajo `#ifdef _WIN32` esconde una falla sin tocar ningun TEST.
+  E3  ningun CMake de tests excluye fuentes ni targets de test (list(FILTER|REMOVE_ITEM|REMOVE_AT)), ni
+      corta la configuracion (`return()`), bajo un if() sobre WIN32/UNIX/APPLE/MINGW/MSVC/CMAKE_SYSTEM_NAME...
+      (el if() se parsea con parentesis balanceados, tambien multilinea), ni usa DISABLED/TEST_FILTER/
+      gtest_filter/EXCLUDE_FROM_ALL sobre algo que ctest registra, salvo el hallazgo declarado `cmake`
+      (archivo + construccion). Un EXCLUDE_FROM_ALL sobre un target que NINGUN CMake registra en ctest no
+      cuenta. Un `cmake`/`solo-windows` que ya no se usa sobra.
 
 REGLAS DE RESULTADOS (`--results DIR`, sobre los XML de gtest de una corrida en Windows)
   R1  los tests SALTEADOS con el marcador == las entradas `Suite.Test` (uno que corre, que no aparece o
       uno marcado que no esta declarado, falla; `--partial` tolera los ausentes).
   R2  TODO otro skip esta declarado como `ambiente` (el mensaje EMPIEZA con el prefijo). Un skip sin
-      mensaje, o sin declarar, o un DISABLED, falla. Un prefijo declarado que no aparece en la corrida
-      completa sobra (salvo `--partial`).
+      mensaje, o sin declarar, falla. Un prefijo declarado que no aparece en la corrida completa sobra
+      (salvo `--partial`).
 
 `--self-test` prueba cada regla en las dos direcciones. Corre antes que el lint.
 """
 import argparse
+import collections
 import os
 import re
 import sys
@@ -55,17 +66,20 @@ CPP = os.path.join(ROOT, 'audio', 'src', 'main', 'cpp')
 LISTADO = os.path.join(CPP, 'tests', 'windows-not-run.txt')
 MARCADOR = '[windows-not-run]'
 MACRO = 'WMA_WINDOWS_NOT_RUN'
-TIPOS = ('variante', 'ambiente', 'cmake', 'solo-windows')
+TIPOS = ('variante', 'ambiente', 'cmake', 'solo-windows', 'fuera', 'deshabilitado')
+HALLAZGOS = ('cmake', 'fuera')   # `tipo | ruta | clave | razon`: una entrada por hallazgo
 
 PLATFORM = re.compile(
-    r'\b(_WIN32|WIN32|_WIN64|__MINGW32__|__MINGW64__|_MSC_VER|__CYGWIN__|__APPLE__|__MACH__|TARGET_OS_\w+|'
-    r'__linux__|__gnu_linux__|__unix__|__unix|__ANDROID__)\b')
+    r'\b(_WIN32|WIN32|__WIN32__|_WIN64|__MINGW32__|__MINGW64__|__MINGW__|_MSC_VER|__CYGWIN__|WINAPI_FAMILY\w*|'
+    r'__APPLE__|__MACH__|TARGET_OS_\w+|GTEST_OS_\w+|'
+    r'__linux__|__linux|linux|__gnu_linux__|__unix__|__unix|unix|__ANDROID__|__ANDROID_API__|'
+    r'__FreeBSD__|__NetBSD__|__OpenBSD__|__sun|__EMSCRIPTEN__|__QNX__|__has_include)\b')
 TEST_DECL = re.compile(r'^\s*(TEST|TEST_F|TEST_P|TYPED_TEST|TYPED_TEST_P)\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)', re.MULTILINE)
 INSTANTIATE = re.compile(
     r'^\s*(INSTANTIATE_TEST_SUITE_P|INSTANTIATE_TEST_CASE_P|INSTANTIATE_TYPED_TEST_SUITE_P)\s*\(\s*(\w+)\s*,\s*(\w+)',
     re.MULTILINE)
 PP = re.compile(r'^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$')
-EXENTO_FUENTE = {os.path.join('tests', 'support', 'WindowsNotRun.h')}
+EXENTO_FUENTE = {os.path.join('tests', 'support', 'WindowsNotRun.h')}   # define la macro: no la usa
 
 
 # ---------------------------------------------------------------- fuentes
@@ -155,11 +169,15 @@ def usos_de_la_macro(root):
 class Listado:
     def __init__(self):
         self.no_run = {}                       # Suite.Test -> razon
-        self.tipos = {t: {} for t in TIPOS}    # tipo -> { nombre: razon }
+        self.tipos = {t: {} for t in TIPOS if t not in HALLAZGOS}    # tipo -> { nombre: razon }
+        self.hallazgos = {t: collections.Counter() for t in HALLAZGOS}   # tipo -> {(ruta, clave): cuantas}
         self.errores = []
 
     def __getitem__(self, tipo):
         return self.tipos[tipo]
+
+    def cuenta(self, tipo):
+        return sum(self.hallazgos[tipo].values())
 
 
 def leer_listado(path):
@@ -172,14 +190,25 @@ def leer_listado(path):
         line = raw.strip()
         if not line or line.startswith('#'):
             continue
+        cabeza = line.split('|', 1)[0].strip()
+        if cabeza in HALLAZGOS:
+            # `tipo | ruta | clave | razon`: la clave puede traer `||` (sin espacio en medio), por eso se
+            # parte en ` | `.
+            campos = [c.strip() for c in re.split(r' \| ', line, maxsplit=3)]
+            if len(campos) != 4 or not all(campos):
+                lst.errores.append('%s:%d: se espera `%s | ruta | %s | razon` (todo con contenido): %r'
+                                   % (base, no, cabeza, 'construccion' if cabeza == 'cmake' else 'condicion', raw))
+                continue
+            lst.hallazgos[cabeza][(campos[1], campos[2])] += 1
+            continue
         campos = [c.strip() for c in line.split('|', 2)]
         if campos[0] in TIPOS:
             if len(campos) != 3 or not campos[1] or not campos[2]:
                 lst.errores.append('%s:%d: se espera `%s | nombre | razon` (con razon): %r' % (base, no, campos[0], raw))
                 continue
             tipo, nombre, razon = campos
-            if tipo in ('variante',) and not re.fullmatch(r'\w+\.\w+', nombre):
-                lst.errores.append('%s:%d: la variante es `Suite.Test`: %r' % (base, no, raw)); continue
+            if tipo in ('variante', 'deshabilitado') and not re.fullmatch(r'\w+\.\w+', nombre):
+                lst.errores.append('%s:%d: `%s` lleva `Suite.Test`: %r' % (base, no, tipo, raw)); continue
             if nombre in lst.tipos[tipo]:
                 lst.errores.append('%s:%d: entrada repetida: %s | %s' % (base, no, tipo, nombre))
             lst.tipos[tipo][nombre] = razon
@@ -194,6 +223,24 @@ def leer_listado(path):
             lst.errores.append('%s:%d: entrada repetida: %s' % (base, no, nombre))
         lst.no_run[nombre] = razon
     return lst
+
+
+def comparar_hallazgos(tipo, hallados, declarados, sobra_si_falta_el_archivo=True):
+    """hallados: [(ruta, clave, donde, mensaje)]; declarados: Counter {(ruta, clave): n}. Trinquete en las
+    dos direcciones: un hallazgo sin declarar falla, y uno declarado que ya no existe (o que existe menos
+    veces) sobra."""
+    errores = []
+    vistos = collections.Counter((r, c) for r, c, _, _ in hallados)
+    for (r, c), n in sorted(vistos.items()):
+        if n > declarados.get((r, c), 0):
+            for rr, cc, donde, msg in hallados:
+                if (rr, cc) == (r, c):
+                    errores.append('%s: %s -- si es legitimo, declaralo: `%s | %s | %s | razon`' % (donde, msg, tipo, r, c))
+    for (r, c), n in sorted(declarados.items()):
+        if vistos.get((r, c), 0) < n:
+            errores.append('el listado declara `%s | %s | %s` %d vez/veces y el arbol lo tiene %d (sobra la entrada)'
+                           % (tipo, r, c, n, vistos.get((r, c), 0)))
+    return errores
 
 
 def cuerpo_de(texto, desde):
@@ -212,18 +259,45 @@ def cuerpo_de(texto, desde):
     return None
 
 
+def normalizar_pp(kind, rest):
+    """`#ifdef  _WIN32 ` -> `ifdef _WIN32`; `#if ! defined ( _WIN32 )` -> `if !defined(_WIN32)`."""
+    cond = re.sub(r'\s+', ' ', rest).strip()
+    cond = re.sub(r'\bdefined\s*\(', 'defined(', cond)
+    cond = re.sub(r'\(\s+', '(', cond)
+    cond = re.sub(r'\s+\)', ')', cond)
+    cond = re.sub(r'!\s+', '!', cond)
+    return ('%s %s' % (kind, cond)).strip()
+
+
+def directivas(lines):
+    """[(idx, kind, rest)] de las directivas del preprocesador; una continuacion con `\\` se une a su
+    primera linea (un `#if A \\ && defined(_WIN32)` no se escapa por estar partido)."""
+    out, idx = [], 0
+    while idx < len(lines):
+        pp = PP.match(lines[idx])
+        if not pp:
+            idx += 1
+            continue
+        kind, rest, ini = pp.group(1), pp.group(2), idx
+        while rest.rstrip().endswith('\\') and idx + 1 < len(lines):
+            rest = rest.rstrip()[:-1] + ' ' + lines[idx + 1]
+            idx += 1
+        out.append((ini, kind, rest))
+        idx += 1
+    return out
+
+
 def analizar_fuentes(root, lst):
-    """E2a / E2b / E2c. Devuelve (errores, variantes_halladas, solo_win_usados)."""
-    errores, variantes, solo_usados = [], set(), set()
+    """E2a / E2b / E2c / E2d. Devuelve (errores, variantes_halladas, solo_win_usados, deshabilitados, fuera)."""
+    errores, variantes, solo_usados, deshab, fuera = [], set(), set(), set(), []
     solo = lst['solo-windows']
     solo_archivos = {n for n in solo if n.endswith(('.cpp', '.h'))}
     for path in sorted(archivos_de_test(root, ('.cpp', '.h'))):
         rel = os.path.relpath(path, root)
-        if rel in EXENTO_FUENTE:
-            continue
-        if os.path.basename(path) in solo_archivos:
+        # Un archivo `solo-windows` queda exento de E2a (sus TEST estan bajo la guarda a proposito), no del resto.
+        es_solo = os.path.basename(path) in solo_archivos
+        if es_solo:
             solo_usados.add(os.path.basename(path))
-            continue
         texto = sin_comentarios(leer(path))
         lines = texto.split('\n')
         offsets, acc = [], 0
@@ -241,45 +315,56 @@ def analizar_fuentes(root, lst):
                     hi = mid - 1
             return lo
 
-        # --- E2b: los TEST con su cuerpo (por offsets) ---
+        # --- los TEST con su cuerpo (por offsets) ---
         cuerpos = []   # (linea_ini, linea_fin, 'Suite.Test', empieza_con_macro)
         for m in TEST_DECL.finditer(texto):
             nombre = '%s.%s' % (m.group(2), m.group(3))
             if m.group(2).startswith('DISABLED_') or m.group(3).startswith('DISABLED_'):
-                errores.append('%s:%d: %s esta DISABLED_: un test que no corre sin declarar (E2c)'
-                               % (norm(rel), linea_de(m.start()) + 1, nombre))
+                deshab.add(nombre)
+                if nombre not in lst['deshabilitado']:
+                    errores.append('%s:%d: %s esta DISABLED_: un test que no corre sin declarar '
+                                   '(`deshabilitado | %s | razon`) (E2c)' % (norm(rel), linea_de(m.start()) + 1, nombre, nombre))
             cb = cuerpo_de(texto, m.end())
             if cb is None:
                 continue
             primero = texto[cb[0] + 1:cb[1]].lstrip()
             cuerpos.append((linea_de(cb[0]), linea_de(cb[1]), nombre, primero.startswith(MACRO + '(')))
 
+        def cuerpo_que_contiene(idx):
+            for c in cuerpos:
+                if c[0] < idx < c[1]:
+                    return c
+            return None
+
+        dirs = directivas(lines)
+        for idx, kind, rest in dirs:
+            if kind not in ('if', 'ifdef', 'ifndef', 'elif') or not PLATFORM.search(rest):
+                continue
+            c = cuerpo_que_contiene(idx)
+            if c is None:
+                fuera.append((norm(rel), normalizar_pp(kind, rest), '%s:%d' % (norm(rel), idx + 1),
+                              '`#%s` de plataforma fuera de los cuerpos de TEST (E2d)' % kind))
+            elif not c[3]:
+                variantes.add(c[2])
+                if c[2] not in lst['variante']:
+                    errores.append(
+                        '%s:%d: `#%s` sobre una macro de plataforma dentro del cuerpo de %s, que no '
+                        'empieza con %s y no esta declarado `variante` en el listado (E2b)'
+                        % (norm(rel), idx + 1, kind, c[2], MACRO))
+        if es_solo:
+            continue
+
+        # --- E2a: lo que se registra bajo un bloque de plataforma ---
         pila = []
+        dir_por_linea = {idx: (kind, rest) for idx, kind, rest in dirs}
         for idx, line in enumerate(lines):
-            pp = PP.match(line)
-            if pp:
-                kind, rest = pp.group(1), pp.group(2)
+            if idx in dir_por_linea:
+                kind, rest = dir_por_linea[idx]
                 plat = bool(PLATFORM.search(rest))
                 if kind in ('if', 'ifdef', 'ifndef'):
                     pila.append(plat)
-                    if plat:
-                        for ini, fin, nombre, con_macro in cuerpos:
-                            if ini < idx < fin and not con_macro:
-                                variantes.add(nombre)
-                                if nombre not in lst['variante']:
-                                    errores.append(
-                                        '%s:%d: `#%s` sobre una macro de plataforma dentro del cuerpo de %s, que no '
-                                        'empieza con %s y no esta declarado `variante` en el listado (E2b)'
-                                        % (norm(rel), idx + 1, kind, nombre, MACRO))
                 elif kind == 'elif' and pila:
                     pila[-1] = pila[-1] or plat
-                    if plat:
-                        for ini, fin, nombre, con_macro in cuerpos:
-                            if ini < idx < fin and not con_macro:
-                                variantes.add(nombre)
-                                if nombre not in lst['variante']:
-                                    errores.append('%s:%d: `#elif` de plataforma dentro del cuerpo de %s sin declarar (E2b)'
-                                                   % (norm(rel), idx + 1, nombre))
                 elif kind == 'endif' and pila:
                     pila.pop()
                 continue
@@ -298,76 +383,188 @@ def analizar_fuentes(root, lst):
             if m:
                 errores.append('%s:%d: %s(%s, %s...) dentro de un bloque condicionado a una macro de plataforma (E2a)'
                                % (norm(rel), idx + 1, m.group(1), m.group(2), m.group(3)))
-    return errores, variantes, solo_usados
+    return errores, variantes, solo_usados, deshab, fuera
 
 
 # ------------------------------------------------------------------ CMake
 
-CM_BLOCK = re.compile(r'^\s*(if|elseif|else|endif)\s*\((.*)\)\s*$', re.IGNORECASE)
-CM_PLATFORM = re.compile(r'\b(WIN32|UNIX|APPLE|MINGW|MSVC|CYGWIN|ANDROID|LINUX|CMAKE_SYSTEM_NAME|'
-                         r'CMAKE_HOST_SYSTEM_NAME|CMAKE_HOST_WIN32|CMAKE_HOST_UNIX|CMAKE_HOST_APPLE)\b')
+CM_PLATFORM = re.compile(r'\b(WIN32|UNIX|APPLE|MINGW|MSVC|CYGWIN|ANDROID|IOS|LINUX|EMSCRIPTEN|CMAKE_(HOST_)?SYSTEM\w*|'
+                         r'CMAKE_HOST_WIN32|CMAKE_HOST_UNIX|CMAKE_HOST_APPLE)\b')
 CM_SRC = re.compile(r'[\w./${}-]+\.(?:cpp|cc|c)\b')
-CM_TARGET = re.compile(r'^\s*(add_executable|add_test|gtest_discover_tests|wma_gtest_discover_tests|add_subdirectory)\s*\(',
-                       re.IGNORECASE)
-CM_RETURN = re.compile(r'^\s*return\s*\(\s*\)', re.IGNORECASE)
-CM_FILTRO = re.compile(r'\bDISABLED(_\w*)?\b|\bTEST_FILTER\b|gtest_filter|GTEST_FILTER|\bEXCLUDE_FROM_ALL\b',
-                       re.IGNORECASE)
+CM_TARGET = ('add_executable', 'add_test', 'gtest_discover_tests', 'wma_gtest_discover_tests', 'add_subdirectory')
+CM_LISTA = ('FILTER', 'REMOVE_ITEM', 'REMOVE_AT')
+CM_FILTRO = re.compile(r'\bDISABLED(_\w*)?\b|\bTEST_FILTER\b|gtest_filter|GTEST_FILTER', re.IGNORECASE)
+CM_EXCLUDE = re.compile(r'\bEXCLUDE_FROM_ALL\b', re.IGNORECASE)
+CM_CMD = re.compile(r'([A-Za-z_]\w*)\s*\(')
+
+
+def cm_sin_comentarios(text):
+    """Blanquea los comentarios (`# ...` y `#[[ ... ]]`) fuera de strings; conserva saltos de linea."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == '\\' else 1
+            out.append(text[i:j + 1]); i = j + 1
+        elif c == '#':
+            m = re.match(r'#\[(=*)\[', text[i:])
+            if m:
+                cierre = ']' + m.group(1) + ']'
+                j = text.find(cierre, i)
+                j = n if j < 0 else j + len(cierre)
+            else:
+                j = text.find('\n', i)
+                j = n if j < 0 else j
+            out.append(''.join('\n' if ch == '\n' else ' ' for ch in text[i:j])); i = j
+        else:
+            out.append(c); i += 1
+    return ''.join(out)
+
+
+def cm_comandos(text):
+    """[(nombre_en_minusculas, args_normalizados, linea)] con los parentesis BALANCEADOS: una llamada
+    partida en varias lineas (un `if(` con `NOT WIN32` en la segunda) es UNA."""
+    text = cm_sin_comentarios(text)
+    out, pos, n = [], 0, len(text)
+    while True:
+        m = CM_CMD.search(text, pos)
+        if not m:
+            return out
+        i, prof = m.end(), 1
+        while i < n and prof:
+            c = text[i]
+            if c == '"':
+                i += 1
+                while i < n and text[i] != '"':
+                    i += 2 if text[i] == '\\' else 1
+            elif c == '(':
+                prof += 1
+            elif c == ')':
+                prof -= 1
+            i += 1
+        args = ' '.join(text[m.end():i - 1].split())
+        out.append((m.group(1).lower(), args, text.count('\n', 0, m.start()) + 1))
+        pos = i
+
+
+def cm_cmake_files(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ('build', 'build-san', '.deps', 'thirdparty')]
+        if 'CMakeLists.txt' in filenames:
+            yield dirpath, os.path.join(dirpath, 'CMakeLists.txt')
+
+
+def cm_registrados(root):
+    """(nombres de target que ctest registra, hay_registros_no_resolubles). Los de dentro de un function()/
+    macro() son la definicion del helper, no un registro."""
+    nombres, desconocido = set(), False
+    for _, path in cm_cmake_files(root):
+        prof = 0
+        for nombre, args, _ in cm_comandos(leer(path)):
+            if nombre in ('function', 'macro'):
+                prof += 1; continue
+            if nombre in ('endfunction', 'endmacro'):
+                prof = max(0, prof - 1); continue
+            if prof:
+                continue
+            toks = args.split()
+            if nombre in ('gtest_discover_tests', 'wma_gtest_discover_tests'):
+                cand = toks[:1]
+            elif nombre == 'add_test':
+                if toks[:1] == ['NAME']:
+                    cand = toks[1:2] + (toks[toks.index('COMMAND') + 1:toks.index('COMMAND') + 2] if 'COMMAND' in toks else [])
+                else:
+                    cand = toks[:2]
+            else:
+                continue
+            for t in cand:
+                if '$' in t:
+                    desconocido = True
+                else:
+                    nombres.add(t)
+    return nombres, desconocido
+
+
+def cm_objetivos_excluidos(nombre, args):
+    """Los targets sobre los que un comando pone EXCLUDE_FROM_ALL, o None si no se sabe a cual."""
+    toks = args.split()
+    if nombre in ('add_executable', 'add_library') and toks:
+        return toks[:1]
+    if nombre == 'set_target_properties' and 'PROPERTIES' in toks:
+        return toks[:toks.index('PROPERTIES')]
+    if nombre == 'set_property' and 'TARGET' in toks:
+        fin = [i for i, t in enumerate(toks) if t in ('APPEND', 'APPEND_STRING', 'PROPERTY')]
+        return toks[toks.index('TARGET') + 1:(fin[0] if fin else len(toks))]
+    return None
 
 
 def analizar_cmake(root, lst):
-    """E3. Devuelve (errores, cmake_usados, solo_usados)."""
-    errores, usados, solo_usados = [], set(), set()
+    """E3. Devuelve (errores, solo_usados). Un hallazgo es (ruta, clave): la clave es la construccion
+    normalizada, con el if() que la condiciona (`if(WIN32) => return()`)."""
     solo = {n for n in lst['solo-windows'] if n.endswith(('.cpp', '.h'))}
-    declarados = lst['cmake']
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in ('build', 'build-san', '.deps', 'thirdparty')]
-        if not re.search(r'[/\\]tests?([/\\]|$)', dirpath + os.sep) or 'CMakeLists.txt' not in filenames:
+    registrados, desconocido = cm_registrados(root)
+    hallados, solo_usados = [], set()
+    for dirpath, path in cm_cmake_files(root):
+        if not re.search(r'[/\\]tests?([/\\]|$)', dirpath + os.sep):
             continue
-        path = os.path.join(dirpath, 'CMakeLists.txt')
         rel = norm(os.path.relpath(path, root))
-        hallazgos = []
-        pila = []
-        for no, raw in enumerate(leer(path).splitlines(), 1):
-            line = raw.split('#', 1)[0]
-            if CM_FILTRO.search(line):
-                hallazgos.append('%s:%d: DISABLED/TEST_FILTER/gtest_filter/EXCLUDE_FROM_ALL en un CMake de tests: '
-                                 'un test que no corre sin declarar' % (rel, no))
-            b = CM_BLOCK.match(line)
-            if b:
-                kind = b.group(1).lower()
-                plat = bool(CM_PLATFORM.search(b.group(2)))
-                if kind == 'if':
-                    pila.append(plat)
-                elif kind == 'elseif' and pila:
-                    pila[-1] = pila[-1] or plat
-                elif kind == 'endif' and pila:
+        pila = []     # [es_de_plataforma, rotulo de la rama vigente, condicion del if]
+        for nombre, args, no in cm_comandos(leer(path)):
+            if nombre == 'if':
+                pila.append([bool(CM_PLATFORM.search(args)), 'if(%s)' % args, args])
+                continue
+            if nombre == 'elseif' and pila:
+                pila[-1][0] = pila[-1][0] or bool(CM_PLATFORM.search(args))
+                pila[-1][1] = 'elseif(%s)' % args
+                continue
+            if nombre == 'else' and pila:
+                pila[-1][1] = 'else(%s)' % pila[-1][2]
+                continue
+            if nombre == 'endif':
+                if pila:
                     pila.pop()
                 continue
-            if not any(pila):
-                continue
-            if CM_RETURN.match(line):
-                hallazgos.append('%s:%d: return() bajo una condicion de plataforma corta la configuracion de los tests' % (rel, no))
-            if CM_TARGET.match(line):
-                hallazgos.append('%s:%d: un target de test (%s) bajo una condicion de plataforma'
-                                 % (rel, no, line.strip().split('(')[0]))
-            for src in CM_SRC.findall(line):
-                base = os.path.basename(src)
-                if base in solo:
-                    solo_usados.add(base)
-                    continue
-                candidato = os.path.normpath(os.path.join(dirpath, src))
-                es_de_test = (not re.search(r'[${}]', src) and os.path.exists(candidato)
-                              and re.search(r'[/\\]tests?[/\\]', candidato + os.sep) is not None) \
-                    or re.fullmatch(r'test_\w+\.cpp', base) is not None
-                if es_de_test:
-                    hallazgos.append('%s:%d: %s bajo una condicion de plataforma: un test no se excluye por SO, '
-                                     'se declara en windows-not-run.txt' % (rel, no, src))
-        if hallazgos:
-            if rel in declarados:
-                usados.add(rel)
-            else:
-                errores += hallazgos
-    return errores, usados, solo_usados
+            stmt = '%s(%s)' % (nombre, args)
+            rotulo = ' > '.join(e[1] for e in pila if e[0])
+            clave = '%s => %s' % (rotulo, stmt) if rotulo else stmt
+
+            msgs = []
+            hallazgo = msgs.append
+            if CM_FILTRO.search(args):
+                hallazgo('DISABLED/TEST_FILTER/gtest_filter en un CMake de tests: un test que no corre sin declarar')
+            if CM_EXCLUDE.search(args):
+                objetivos = cm_objetivos_excluidos(nombre, args)
+                if objetivos is None or desconocido or any('$' in t or t in registrados for t in objetivos):
+                    hallazgo('EXCLUDE_FROM_ALL sobre algo que ctest registra (o no se sabe cual): sus tests no se construyen')
+            if rotulo:
+                _plataforma(nombre, args, hallazgo, dirpath, solo, solo_usados)
+            if msgs:
+                hallados.append((rel, clave, '%s:%d' % (rel, no), '; '.join(msgs)))
+    return hallados, solo_usados
+
+
+def _plataforma(nombre, args, hallazgo, dirpath, solo, solo_usados):
+    """Lo que no puede estar bajo un if() de plataforma en un CMake de tests."""
+    if nombre == 'return':
+        hallazgo('return() bajo una condicion de plataforma corta la configuracion de los tests')
+    if nombre in CM_TARGET:
+        hallazgo('un target de test (%s) bajo una condicion de plataforma' % nombre)
+    if nombre == 'list' and args.split()[:1] and args.split()[0].upper() in CM_LISTA:
+        hallazgo('list(%s) bajo una condicion de plataforma: excluye elementos de una lista de fuentes' % args.split()[0].upper())
+    for src in CM_SRC.findall(args):
+        base = os.path.basename(src)
+        if base in solo:
+            solo_usados.add(base)
+            continue
+        candidato = os.path.normpath(os.path.join(dirpath, src))
+        es_de_test = (not re.search(r'[${}]', src) and os.path.exists(candidato)
+                      and re.search(r'[/\\]tests?[/\\]', candidato + os.sep) is not None) \
+            or re.fullmatch(r'test_\w+\.cpp', base) is not None
+        if es_de_test:
+            hallazgo('%s bajo una condicion de plataforma: un test no se excluye por SO, se declara en '
+                     'windows-not-run.txt' % src)
 
 
 def chequeo_estatico(root, listado):
@@ -380,16 +577,17 @@ def chequeo_estatico(root, listado):
     for nombre in sorted(set(lst.no_run) - set(usos)):
         errores.append('el listado declara %s pero ningun TEST usa %s (sobra la entrada)' % (nombre, MACRO))
 
-    e2, variantes, solo_fuentes = analizar_fuentes(root, lst)
+    e2, variantes, solo_fuentes, deshab, fuera = analizar_fuentes(root, lst)
     errores += e2
     for nombre in sorted(set(lst['variante']) - variantes):
         errores.append('el listado declara `variante | %s` pero su cuerpo ya no tiene un #if de plataforma, o empieza '
                        'con %s, o no existe (sobra la entrada)' % (nombre, MACRO))
-    ec, cmake_usados, solo_cmake = analizar_cmake(root, lst)
-    errores += ec
-    for ruta in sorted(set(lst['cmake']) - cmake_usados):
-        errores.append('el listado declara `cmake | %s` pero ese CMake no tiene ninguna condicion de plataforma que '
-                       'excluya algo (sobra la entrada)' % ruta)
+    for nombre in sorted(set(lst['deshabilitado']) - deshab):
+        errores.append('el listado declara `deshabilitado | %s` pero ningun TEST tiene ese nombre con prefijo '
+                       'DISABLED_ (sobra la entrada)' % nombre)
+    errores += comparar_hallazgos('fuera', fuera, lst.hallazgos['fuera'])
+    hallados_cm, solo_cmake = analizar_cmake(root, lst)
+    errores += comparar_hallazgos('cmake', hallados_cm, lst.hallazgos['cmake'])
     for nombre in sorted(lst['solo-windows']):
         if nombre.endswith(('.cpp', '.h')):
             if nombre not in solo_fuentes:
@@ -560,20 +758,41 @@ def self_test():
              estatico('e2a_inst', fuente=TEST_OK + '#ifdef _MSC_VER\nINSTANTIATE_TEST_SUITE_P(I, S, ::testing::Values(1));\n#endif\n'))
         caso('E2a TEST bajo una condicion que NO es de plataforma -> verde', False,
              estatico('e2a_otro', fuente=TEST_OK + '#if defined(WMA_TEST_HOOKS)\nTEST(S, B) {}\n#endif\n'))
-        caso('E2a un #if de plataforma que NO envuelve ningun TEST -> verde', False,
-             estatico('e2a_helper', fuente='#if defined(_WIN32)\nint helper();\n#endif\n' + TEST_OK))
-        caso('E2a TEST con DISABLED_ -> rojo', True,
-             estatico('e2a_disabled', fuente=TEST_OK + 'TEST(S, DISABLED_B) {}\n'))
-        b, l = arbol('e2a_solo', listado='S.A | r\nsolo-windows | test_wav_dump_windows.cpp | solo existe en Windows\n')
+        caso('E2a un #if de plataforma que NO envuelve ningun TEST, DECLARADO `fuera` -> verde', False,
+             estatico('e2a_helper', fuente='#if defined(_WIN32)\nint helper();\n#endif\n' + TEST_OK,
+                      listado='S.A | r\nfuera | x/tests/test_a.cpp | if defined(_WIN32) | helper\n'))
+        caso('E2c TEST con DISABLED_ sin declarar -> rojo', True,
+             estatico('e2c_disabled', fuente=TEST_OK + 'TEST(S, DISABLED_B) {}\n'))
+        caso('E2c TEST_F con el DISABLED_ en la suite sin declarar -> rojo', True,
+             estatico('e2c_disabled_suite', fuente=TEST_OK + 'TEST_F(DISABLED_Suite, B) {}\n'))
+        caso('E2c ... declarado `deshabilitado` con razon -> verde', False,
+             estatico('e2c_decl', fuente=TEST_OK + 'TEST(S, DISABLED_B) {}\n',
+                      listado='S.A | r\ndeshabilitado | S.DISABLED_B | no corre en ninguna plataforma\n'))
+        caso('E2c ... y si el DISABLED_ ya no esta -> rojo (sobra)', True,
+             estatico('e2c_sobra', listado='S.A | r\ndeshabilitado | S.DISABLED_B | x\n'))
+        caso('E2c ... sin razon -> rojo', True,
+             estatico('e2c_sinrazon', fuente=TEST_OK + 'TEST(S, DISABLED_B) {}\n',
+                      listado='S.A | r\ndeshabilitado | S.DISABLED_B |\n'))
+        caso('E2c un DISABLED_ solo dentro de un comentario -> verde', False,
+             estatico('e2c_comentario', fuente=TEST_OK + '// TEST(S, DISABLED_B) {}\n'))
+        FW = 'fuera | x/tests/test_wav_dump_windows.cpp | if defined(_WIN32) | envuelve el test solo-windows\n'
+        b, l = arbol('e2a_solo', listado='S.A | r\nsolo-windows | test_wav_dump_windows.cpp | solo existe en Windows\n' + FW)
         _w(b, 'x/tests/test_wav_dump_windows.cpp', '#if defined(_WIN32)\nTEST(WavWin, A) {}\n#endif\n')
         caso('E2a el archivo sólo-Windows declarado -> verde', False, chequeo_estatico(b, l))
         b, l = arbol('e2a_solo_sobra', listado='S.A | r\nsolo-windows | test_wav_dump_windows.cpp | x\n')
         caso('E2a ... y si el archivo declarado no existe -> rojo (sobra)', True, chequeo_estatico(b, l))
+        b, l = arbol('e2a_solo_disabled', listado='S.A | r\nsolo-windows | test_wav_dump_windows.cpp | x\n' + FW)
+        _w(b, 'x/tests/test_wav_dump_windows.cpp', '#if defined(_WIN32)\nTEST(WavWin, DISABLED_A) {}\n#endif\n')
+        caso('E2c el archivo solo-windows NO exime de DISABLED_ -> rojo', True, chequeo_estatico(b, l))
+        b, l = arbol('e2a_solo_fuera', listado='S.A | r\nsolo-windows | test_wav_dump_windows.cpp | x\n')
+        _w(b, 'x/tests/test_wav_dump_windows.cpp', '#ifdef _WIN32\n#define SKIPW() return\n#else\n#define SKIPW()\n#endif\n')
+        caso('E2d el archivo solo-windows NO exime del inventario `fuera` -> rojo', True, chequeo_estatico(b, l))
         caso('E2a un test sólo-Windows suelto y declarado -> verde', False,
              estatico('e2a_solot', fuente=TEST_OK + '#if defined(_WIN32)\nTEST_F(U, W) {}\n#endif\n',
-                      listado='S.A | r\nsolo-windows | U.W | solo Windows\n'))
+                      listado='S.A | r\nsolo-windows | U.W | solo Windows\nfuera | x/tests/test_a.cpp | if defined(_WIN32) | envuelve U.W\n'))
         caso('E2a ... y sin la declaracion -> rojo', True,
-             estatico('e2a_solot_no', fuente=TEST_OK + '#if defined(_WIN32)\nTEST_F(U, W) {}\n#endif\n'))
+             estatico('e2a_solot_no', fuente=TEST_OK + '#if defined(_WIN32)\nTEST_F(U, W) {}\n#endif\n',
+                      listado='S.A | r\nfuera | x/tests/test_a.cpp | if defined(_WIN32) | x\n'))
         caso('E2a ... y si ya no esta bajo #if -> rojo (sobra)', True,
              estatico('e2a_solot_sobra', fuente=TEST_OK + 'TEST_F(U, W) {}\n',
                       listado='S.A | r\nsolo-windows | U.W | solo Windows\n'))
@@ -602,13 +821,56 @@ def self_test():
                       fuente=TEST_OK.replace('    WMA_WINDOWS_NOT_RUN("r");\n', '    WMA_WINDOWS_NOT_RUN("r");\n#if defined(_WIN32)\n#endif\n')))
         caso('E2b #if que NO es de plataforma en el cuerpo -> verde', False,
              estatico('e2b_otro', fuente=TEST_OK + 'TEST(S, B) {\n#if defined(NDEBUG)\n    int a;\n#endif\n}\n'))
-        caso('E2b un #if de plataforma FUERA de los cuerpos (entre tests) -> verde', False,
-             estatico('e2b_fuera', fuente=TEST_OK + '#if defined(_WIN32)\nstatic int w;\n#endif\nTEST(S, B) {}\n'))
+        # E2d — el inventario de lo que esta FUERA de los cuerpos
+        SKIPW = ('#ifdef _WIN32\n#define SKIPW() return\n#else\n#define SKIPW()\n#endif\n'
+                 'TEST(Zz, Y) { SKIPW(); EXPECT_TRUE(false); }\n')
+        caso('E2d #define SKIPW() bajo #ifdef _WIN32 fuera de los cuerpos, sin declarar -> rojo', True,
+             estatico('e2d_skipw', fuente=TEST_OK + SKIPW))
+        caso('E2d ... el #ifdef declarado `fuera` -> verde', False,
+             estatico('e2d_skipw_ok', fuente=TEST_OK + SKIPW,
+                      listado='S.A | r\nfuera | x/tests/test_a.cpp | ifdef _WIN32 | el macro cambia en Windows\n'))
+        caso('E2d ... y un #ifdef declarado que ya no esta -> rojo (sobra)', True,
+             estatico('e2d_sobra', listado='S.A | r\nfuera | x/tests/test_a.cpp | ifdef _WIN32 | x\n'))
+        caso('E2d ... declarado SIN razon -> rojo', True,
+             estatico('e2d_sinrazon', fuente=TEST_OK + SKIPW, listado='S.A | r\nfuera | x/tests/test_a.cpp | ifdef _WIN32 |\n'))
+        DOS = '#if defined(_WIN32)\nint a;\n#endif\n#if defined(_WIN32)\nint b;\n#endif\n'
+        caso('E2d la misma condicion DOS veces con UNA sola entrada -> rojo', True,
+             estatico('e2d_dos', fuente=TEST_OK + DOS,
+                      listado='S.A | r\nfuera | x/tests/test_a.cpp | if defined(_WIN32) | a\n'))
+        caso('E2d ... y con DOS entradas -> verde', False,
+             estatico('e2d_dos_ok', fuente=TEST_OK + DOS,
+                      listado='S.A | r\nfuera | x/tests/test_a.cpp | if defined(_WIN32) | a\nfuera | x/tests/test_a.cpp | if defined(_WIN32) | b\n'))
+        caso('E2d los espacios en la condicion no cambian la clave -> verde', False,
+             estatico('e2d_espacios', fuente=TEST_OK + '#  if  ! defined ( _WIN32 )\nint a;\n#endif\n',
+                      listado='S.A | r\nfuera | x/tests/test_a.cpp | if !defined(_WIN32) | a\n'))
+        caso('E2d una condicion con `||` en la clave se declara y calza -> verde', False,
+             estatico('e2d_or', fuente=TEST_OK + '#if defined(_WIN32) || defined(__APPLE__)\nint a;\n#endif\n',
+                      listado='S.A | r\nfuera | x/tests/test_a.cpp | if defined(_WIN32) || defined(__APPLE__) | a\n'))
+        caso('E2d un #if partido con barra invertida que nombra _WIN32 en la 2da linea -> rojo', True,
+             estatico('e2d_continuacion', fuente=TEST_OK + '#if FOO && \\\n    defined(_WIN32)\nint a;\n#endif\n'))
+        caso('E2d en un archivo de tests/support -> rojo', True,
+             estatico('e2d_support', extra={'x/tests/support/H.h': '#ifdef _WIN32\nint h;\n#endif\n'}))
+        caso('E2d un #if que NO es de plataforma fuera de los cuerpos -> verde', False,
+             estatico('e2d_otro', fuente=TEST_OK + '#if defined(NDEBUG)\nint a;\n#endif\n'))
+        caso('E2d un #if de plataforma en un comentario -> verde', False,
+             estatico('e2d_comentario', fuente=TEST_OK + '// #ifdef _WIN32\n/* #if defined(__APPLE__) */\n'))
+        # macros de plataforma que la regex no veia
+        for macro in ('GTEST_OS_WINDOWS', '_WIN64', '__CYGWIN__', '__FreeBSD__', '__MACH__', 'GTEST_OS_LINUX'):
+            caso('E2a #ifndef %s envolviendo un TEST -> rojo' % macro, True,
+                 estatico('e2a_' + macro, fuente=TEST_OK + '#ifndef %s\nTEST(Zz, Y) {}\n#endif\n' % macro))
+        caso('E2b #ifdef GTEST_OS_WINDOWS en el cuerpo de un test sin declarar -> rojo', True,
+             estatico('e2b_gtest_os', fuente=TEST_OK + 'TEST(S, B) {\n#ifdef GTEST_OS_WINDOWS\n    int a;\n#endif\n}\n'))
 
         # E3 — CMake
+        CMK = 'x/tests/CMakeLists.txt'
+
+        def cm(clave, razon='r'):
+            return 'S.A | r\ncmake | %s | %s | %s\n' % (CMK, clave, razon)
+
         caso('E3 el sólo-Windows declarado bajo if(WIN32) -> verde', False,
              estatico('e3_ok', cmake='add_executable(t test_a.cpp)\nif(WIN32)\n  target_sources(t PRIVATE test_wav_dump_windows.cpp)\nendif()\n',
-                      listado='S.A | r\nsolo-windows | test_wav_dump_windows.cpp | solo Windows\n',
+                      listado='S.A | r\nsolo-windows | test_wav_dump_windows.cpp | solo Windows\n'
+                              'fuera | x/tests/test_wav_dump_windows.cpp | if defined(_WIN32) | envuelve\n',
                       extra={'x/tests/test_wav_dump_windows.cpp': '#if defined(_WIN32)\nTEST(W, A) {}\n#endif\n'}))
         caso('E3 test_a.cpp bajo if(NOT WIN32) -> rojo', True,
              estatico('e3_notwin', cmake='if(NOT WIN32)\n  target_sources(t PRIVATE test_a.cpp)\nendif()\n'))
@@ -624,27 +886,72 @@ def self_test():
              estatico('e3_disc', cmake='if(UNIX)\n  gtest_discover_tests(t)\nendif()\n'))
         caso('E3 return() bajo if(WIN32) no declarado -> rojo', True,
              estatico('e3_return', cmake='if(WIN32)\n  return()\nendif()\n'))
-        caso('E3 return() bajo if(WIN32) DECLARADO `cmake` -> verde', False,
-             estatico('e3_return_ok', cmake='if(WIN32)\n  return()\nendif()\n',
-                      listado='S.A | r\ncmake | x/tests/CMakeLists.txt | el nucleo de libusb de Windows es otro\n'))
-        caso('E3 ... y una declaracion `cmake` sin condicion -> rojo (sobra)', True,
-             estatico('e3_cmake_sobra', cmake='add_executable(t test_a.cpp)\n',
-                      listado='S.A | r\ncmake | x/tests/CMakeLists.txt | x\n'))
+        caso('E3 return() bajo if(WIN32) DECLARADO por hallazgo -> verde', False,
+             estatico('e3_return_ok', cmake='if(WIN32)\n  return()\nendif()\n', listado=cm('if(WIN32) => return()')))
+        caso('E3 ... y una declaracion de otra construccion -> rojo (falta y sobra)', True,
+             estatico('e3_return_otro', cmake='if(WIN32)\n  return()\nendif()\n', listado=cm('if(UNIX) => return()')))
+        caso('E3 ... y una declaracion sin condicion -> rojo (sobra)', True,
+             estatico('e3_cmake_sobra', cmake='add_executable(t test_a.cpp)\n', listado=cm('if(WIN32) => return()')))
+        caso('E3 cmake de tres campos (el archivo entero) -> rojo', True,
+             estatico('e3_tres', cmake='if(WIN32)\n  return()\nendif()\n',
+                      listado='S.A | r\ncmake | %s | exime todo el archivo\n' % CMK))
+        caso('E3 el archivo declarado NO exime otra construccion: return() declarado + REMOVE_ITEM nuevo -> rojo', True,
+             estatico('e3_no_exime', cmake='if(WIN32)\n  return()\nendif()\nif(WIN32)\n  list(REMOVE_ITEM S test_a.cpp)\nendif()\n',
+                      listado=cm('if(WIN32) => return()')))
         caso('E3 DISABLED en un CMake de tests -> rojo', True,
              estatico('e3_disabled', cmake='set_tests_properties(S.A PROPERTIES DISABLED TRUE)\n'))
         caso('E3 TEST_FILTER en un CMake de tests -> rojo', True,
              estatico('e3_filter', cmake='gtest_discover_tests(t TEST_FILTER -S.*)\n'))
+        caso('E3 TEST_FILTER nuevo en un target con otro hallazgo declarado -> rojo', True,
+             estatico('e3_filter_nuevo', cmake='if(WIN32)\n  return()\nendif()\ngtest_discover_tests(t TEST_FILTER -S.*)\n',
+                      listado=cm('if(WIN32) => return()')))
         caso('E3 gtest_filter -> rojo', True,
              estatico('e3_gfilter', cmake='add_test(NAME x COMMAND t --gtest_filter=-S.*)\n'))
-        caso('E3 DISABLED declarado `cmake` -> verde', False,
+        caso('E3 DISABLED declarado por hallazgo -> verde', False,
              estatico('e3_disabled_ok', cmake='set_tests_properties(S.A PROPERTIES DISABLED TRUE)\n',
-                      listado='S.A | r\ncmake | x/tests/CMakeLists.txt | x\n'))
+                      listado=cm('set_tests_properties(S.A PROPERTIES DISABLED TRUE)')))
         caso('E3 una fuente de produccion bajo if(WIN32) -> verde', False,
              estatico('e3_prod', cmake='if(WIN32)\n  set(P ../PlatformWindows.cpp)\nendif()\nadd_executable(t test_a.cpp ${P})\n'))
         caso('E3 un set() y un target_compile_definitions bajo if(WIN32) -> verde', False,
              estatico('e3_defs', cmake='if(WIN32)\n  set(X 1)\n  target_compile_definitions(t PRIVATE A=1)\nendif()\n'))
         caso('E3 un comentario con DISABLED -> verde', False,
              estatico('e3_comentario', cmake='# no DISABLED aca\nadd_executable(t test_a.cpp)\n'))
+        caso('E3 un bloque de comentario #[[ ]] con return() bajo if(WIN32) -> verde', False,
+             estatico('e3_bloque', cmake='if(WIN32)\n#[[ return() ]]\nendif()\n'))
+        # E3 — los huecos que el reviewer midio
+        caso('E3 if(WIN32) list(REMOVE_ITEM ... test_x.cpp) -> rojo', True,
+             estatico('e3_remove', cmake='set(S test_a.cpp)\nif(WIN32)\n  list(REMOVE_ITEM S test_c_api_song.cpp)\nendif()\n'))
+        caso('E3 if(WIN32) list(REMOVE_ITEM S ${X}) (sin nombre de test) -> rojo', True,
+             estatico('e3_remove_var', cmake='if(WIN32)\n  list(REMOVE_ITEM S ${X})\nendif()\n'))
+        caso('E3 if(WIN32) list(FILTER S EXCLUDE REGEX "x") -> rojo', True,
+             estatico('e3_lfilter', cmake='if(WIN32)\n  list(FILTER S EXCLUDE REGEX "test_a")\nendif()\n'))
+        caso('E3 if(WIN32) list(REMOVE_AT S 0) -> rojo', True,
+             estatico('e3_remove_at', cmake='if(WIN32)\n  list(REMOVE_AT S 0)\nendif()\n'))
+        caso('E3 if(WIN32) list(APPEND S foo.cpp) (no es exclusion) -> verde', False,
+             estatico('e3_append', cmake='if(WIN32)\n  list(APPEND S foo.cpp)\nendif()\n'))
+        caso('E3 if( partido en dos lineas con NOT WIN32 en la 2da -> rojo', True,
+             estatico('e3_multilinea', cmake='if(FOO AND\n   NOT WIN32)\n  list(REMOVE_ITEM S x.cpp)\nendif()\n'))
+        caso('E3 ... y el endif() de un if multilinea desapila el bloque CORRECTO -> verde despues', False,
+             estatico('e3_multilinea_endif', cmake='if(FOO AND\n   NOT WIN32)\n  set(a 1)\nendif()\nlist(REMOVE_ITEM S x.cpp)\n'))
+        caso('E3 if(WIN32) anidado dentro de un if() comun -> rojo', True,
+             estatico('e3_anidado', cmake='if(FOO)\n  if(WIN32)\n    return()\n  endif()\nendif()\n'))
+        caso('E3 elseif(WIN32) con return() -> rojo', True,
+             estatico('e3_elseif', cmake='if(FOO)\n  set(a 1)\nelseif(WIN32)\n  return()\nendif()\n'))
+        caso('E3 EXCLUDE_FROM_ALL sobre un target que ctest registra -> rojo', True,
+             estatico('e3_efa', cmake='add_executable(t EXCLUDE_FROM_ALL test_a.cpp)\nwma_gtest_discover_tests(t)\n'))
+        caso('E3 EXCLUDE_FROM_ALL por set_target_properties sobre uno registrado -> rojo', True,
+             estatico('e3_efa_props', cmake='add_executable(t test_a.cpp)\nset_target_properties(t PROPERTIES EXCLUDE_FROM_ALL ON)\n'
+                                            'gtest_discover_tests(t)\n'))
+        caso('E3 EXCLUDE_FROM_ALL sobre un target que NINGUN CMake registra (una herramienta) -> verde', False,
+             estatico('e3_efa_tool', cmake='add_executable(t test_a.cpp)\nwma_gtest_discover_tests(t)\n'
+                                           'add_executable(tool EXCLUDE_FROM_ALL tool.cpp)\n'))
+        caso('E3 EXCLUDE_FROM_ALL de una herramienta y un registro por variable -> rojo (no se sabe)', True,
+             estatico('e3_efa_var', cmake='add_executable(tool EXCLUDE_FROM_ALL tool.cpp)\nwma_gtest_discover_tests(${T})\n'))
+        caso('E3 EXCLUDE_FROM_ALL sobre un add_subdirectory -> rojo', True,
+             estatico('e3_efa_sub', cmake='add_subdirectory(sub EXCLUDE_FROM_ALL)\n'))
+        caso('E3 el target registrado en OTRO CMake del arbol cuenta -> rojo', True,
+             estatico('e3_efa_otro', cmake='add_executable(tool EXCLUDE_FROM_ALL tool.cpp)\n',
+                      extra={'y/CMakeLists.txt': 'add_test(NAME tool COMMAND tool)\n'}))
 
         # R1 / R2
         def resultados(nombre, casos, listado='S.A | r\n', parcial=False):
@@ -676,11 +983,6 @@ def self_test():
              resultados('r2_sobra_p', [('S', 'A', marcado)], listado=amb, parcial=True))
         caso('R2 un skip no declarado sigue rojo con --partial', True,
              resultados('r2_nodecl_p', [('S', 'A', marcado), ('S', 'C', 'pendiente')], listado=amb, parcial=True))
-        base = os.path.join(tmp, 'r_dis')
-        _w(base, 'x.xml', '<testsuites><testsuite name="S"><testcase name="A" status="notrun" classname="S"/>'
-                          '</testsuite></testsuites>')
-        caso('R2 un test DISABLED (notrun) -> rojo', True,
-             chequeo_resultados(base, _w(base, 'l.txt', ''), False)[0])
         base = os.path.join(tmp, 'r_lista')
         _w(base, 'listado.xml', '<testsuites><testsuite name="S"><testcase name="A"/></testsuite></testsuites>')
         caso('R el XML de discovery (sin status) no cuenta como corrida -> rojo si es lo unico',
@@ -722,8 +1024,10 @@ def main():
             print('  ' + e, file=sys.stderr)
         return 1
     lst = leer_listado(LISTADO)
-    print('check-windows-not-run: OK (%d declarados, %d variantes, %d de ambiente, %d cmake, %d solo-windows%s)' % (
-        len(lst.no_run), len(lst['variante']), len(lst['ambiente']), len(lst['cmake']), len(lst['solo-windows']),
+    print('check-windows-not-run: OK (%d declarados, %d variantes, %d de ambiente, %d cmake, %d fuera, %d deshabilitados, '
+          '%d solo-windows%s)' % (
+        len(lst.no_run), len(lst['variante']), len(lst['ambiente']), lst.cuenta('cmake'), lst.cuenta('fuera'),
+        len(lst['deshabilitado']), len(lst['solo-windows']),
         ', resultados verificados' if args.results else ''))
     return 0
 

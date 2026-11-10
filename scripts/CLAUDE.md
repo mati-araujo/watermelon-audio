@@ -37,13 +37,20 @@ camino critico de un PR atestado (`local_first.md` §2).
 - `check-windows-not-run.py` (REQ-061 AC-061.1): lo que NO corre en Windows se declara, no se esconde. El listado
   `tests/windows-not-run.txt` lleva `Suite.Test | razon` (test POSIX por naturaleza: `WMA_WINDOWS_NOT_RUN("razon")`,
   `tests/support/WindowsNotRun.h`) y las secciones `variante` (cuerpo con un `#if` de plataforma), `ambiente`
-  (prefijo exacto de un skip de ambiente), `cmake` y `solo-windows`; TODA entrada con razon y con trinquete en las dos
-  direcciones. Estatico: ningun TEST/INSTANTIATE dentro de un `#if` sobre una macro de plataforma, ningun `#if` de
-  plataforma en un cuerpo sin declarar, ningun CMake de tests con DISABLED/TEST_FILTER o un if() de plataforma que
-  excluya algo. `--results DIR` (lo corre `run-cpp-tests.ps1` sobre el XML que cada test escribe en
-  `gtest-xml/<target>/`, via `wma_gtest_discover_tests`) exige que TODO skip este declarado. `run-cpp-tests.sh`
-  corre la parte estatica antes de compilar. 🔴 No ve un `#if` de plataforma FUERA de los cuerpos (una constante o un
-  helper que cambia el estimulo, p. ej. `kOverrunBlocksPerTick` en test_analysis_thread.cpp): eso se revisa a mano.
+  (prefijo exacto de un skip de ambiente), `solo-windows`, `deshabilitado` (TEST con prefijo `DISABLED_`) y las dos
+  de HALLAZGO `cmake | ruta | construccion | razon` (p. ej. `if(WIN32) => return()`: nunca el archivo entero) y
+  `fuera | ruta | condicion | razon` (todo `#if` de plataforma FUERA de los cuerpos de TEST, tests/support incluido, sin
+  numeros de linea; N apariciones = N entradas); TODA entrada con razon y con trinquete en las dos direcciones.
+  Estatico: ningun TEST/INSTANTIATE dentro de un `#if` sobre una macro de plataforma (`_WIN32`, `__APPLE__`,
+  `GTEST_OS_*`, `__FreeBSD__`...), ningun `#if` de plataforma en un cuerpo sin declarar, y en los CMake de tests
+  (parseados con parentesis balanceados, tambien un `if(` multilinea) ningun `return()`, `target`, `list(FILTER|
+  REMOVE_ITEM|REMOVE_AT)` o fuente de test bajo un if() de plataforma, ni `DISABLED`/`TEST_FILTER`, ni
+  `EXCLUDE_FROM_ALL` sobre algo que ctest registra (sobre una herramienta que ningun CMake registra no cuenta).
+  `--results DIR` (lo corre `run-cpp-tests.ps1` sobre el XML que cada test escribe en `gtest-xml/<target>/`, via
+  `wma_gtest_discover_tests`) exige que TODO skip este declarado. `run-cpp-tests.sh` corre la parte estatica antes de
+  compilar. 🔴 El inventario `fuera` obliga a DECLARAR cada `#if` de plataforma fuera de un cuerpo (una constante que
+  cambia el estimulo, p. ej. `kOverrunBlocksPerTick` en test_analysis_thread.cpp), pero no juzga si la razon es
+  cierta: que no cambie lo que el test afirma se revisa a mano.
 - `check-jni-signatures.py` (REQ-025): la FIRMA del cruce JNI. 🔴 Su guarda de COMPLETITUD lo
   sostiene: si el parser abarca menos prototipos de los que hay en el arbol, FALLA. Sin baseline:
   nacio en cero desajustes. Las tres preguntas: `audio/src/main/cpp/jni/CLAUDE.md`.

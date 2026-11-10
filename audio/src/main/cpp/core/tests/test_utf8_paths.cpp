@@ -211,6 +211,9 @@ TEST(Utf8Boundary, AC_061_3_FourByteSequencesAreStrict) {
 
     EXPECT_FALSE(wma::platform::utf8ToUtf16("\xF0\x8F\xBF\xBF", out)) << "U+FFFF sobrelargo en 4 bytes";
     EXPECT_FALSE(wma::platform::utf8ToUtf16("\xF0\x80\x80\x80", out)) << "NUL sobrelargo en 4 bytes";
+    // El lead F4 es legal: solo el tope `cp > 0x10FFFF` rechaza lo que pasa de U+10FFFF.
+    EXPECT_FALSE(wma::platform::utf8ToUtf16("\xF4\x90\x80\x80", out)) << "U+110000, uno mas que el maximo";
+    EXPECT_FALSE(wma::platform::utf8ToUtf16("\xF4\xBF\xBF\xBF", out)) << "U+13FFFF, F4 con continuaciones al tope";
     for (int lead = 0xF5; lead <= 0xFF; ++lead) {
         const char seq[] = {static_cast<char>(lead), static_cast<char>(0x80), static_cast<char>(0x80),
                             static_cast<char>(0x80), 0};

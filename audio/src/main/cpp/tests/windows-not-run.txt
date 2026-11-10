@@ -6,7 +6,11 @@
 # trinquete en las dos direcciones: si sobra o falta, rojo):
 #   variante | Suite.Test | razon    el test corre en las dos plataformas pero su CUERPO tiene un #if de plataforma
 #   ambiente | <prefijo> | razon     un skip de AMBIENTE en la corrida de Windows: el prefijo exacto de su mensaje
-#   cmake | ruta | razon             un CMake de tests con una condicion de plataforma que excluye o filtra algo
+#   cmake | ruta | construccion | razon   UN hallazgo de un CMake de tests (archivo + construccion normalizada, p. ej.
+#                                    `if(WIN32) => return()`): excluye, filtra o corta algo bajo una condicion de plataforma
+#   fuera | ruta | condicion | razon  un `#if` de plataforma FUERA de los cuerpos de TEST (`if defined(_WIN32)`); sin numeros
+#                                    de linea; la misma condicion N veces en el archivo = N entradas
+#   deshabilitado | Suite.Test | razon  un TEST con prefijo DISABLED_ (no corre en ninguna plataforma)
 #   solo-windows | nombre | razon    un test (Suite.Test) o una fuente (archivo.cpp) que existe SOLO en Windows
 AudioLooper.Req055CaptureOfATakeDoesNotDropTheNextTake | FIFO (mkfifo) + poll + fcntl: el solapamiento se fuerza con un pipe POSIX que no existe en Windows
 SoundFontLoadTest.LoadFromFdAppliesTheRateItIsGiven | loadFromFd (fd + mmap de una sub-region) no existe en Windows: devuelve false por diseno
@@ -31,9 +35,32 @@ ambiente | sin el material del spec-test | se baja con scripts/fetch-spec-test.s
 ambiente | sin la toma real del g42 | la toma real no se versiona (corpus-g42-manifest.txt)
 ambiente | sin material del spec-test | se baja con scripts/fetch-spec-test.sh
 
-# --- cmake: condiciones de plataforma en los CMake de tests ---
-cmake | usb/tests/libusb/CMakeLists.txt | return() bajo if(WIN32): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
-cmake | core/tests/CMakeLists.txt | EXCLUDE_FROM_ALL de sf_render_preset: una herramienta de medicion a pedido (REQ-040), no un test
+# --- cmake: UN hallazgo por entrada (archivo + construccion normalizada); el archivo entero no se exime ---
+cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return() | return() bajo if(WIN32): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; libusb_descriptor_tests y libusb_backend_lifetime_tests no se configuran en Windows; ya estaba asi en master
+# (core/tests: `EXCLUDE_FROM_ALL` de sf_render_preset NO se declara: el chequeo ve que ningun CMake lo registra en ctest, o sea que no es un test, REQ-040)
+
+# --- fuera: `#if` de plataforma FUERA de los cuerpos de TEST (sin numeros de linea; N apariciones = N entradas) ---
+# Los que viven DENTRO del cuerpo de un test que empieza con WMA_WINDOWS_NOT_RUN o estan en una `variante` no van aca.
+fuera | analysis/tests/support/Corpus.h | if defined(_WIN32) | include de <process.h> (_getpid) en Windows y <unistd.h> en POSIX; no toca ningun TEST
+fuera | analysis/tests/support/Corpus.h | if defined(_WIN32) | pid del directorio temporal del corpus (_getpid / getpid): solo el nombre unico del directorio, no el estimulo
+fuera | analysis/tests/test_analysis_thread.cpp | if defined(_WIN32) | kOverrunBlocksPerTick: 16 bloques por tick en Windows y 8 en POSIX. CAMBIA EL ESTIMULO de AnalysisThreadReq009.WhatIsPublishedAsConvergedWhileTheRingOverrunsActuallyIs, AGapIsDistinguishableFromNotConvergedYet y TheMarkClearsAndTheReadingConvergesOnceTheInputIsWholeAgain: con 8 (= kCapacityFrames) el ring solo se pisa si el analisis NO drena durante la rafaga, y en Windows (Debug, quantum de 15,6 ms) drena y la premisa no se arma ~40 % de las veces; las aserciones son las mismas
+fuera | core/tests/test_c_api_song.cpp | if defined(_WIN32) | include de <windows.h> solo en Windows; no declara ni cambia ningun TEST ni su estimulo
+fuera | core/tests/test_mapped_file.cpp | if defined(_WIN32) | includes (<io.h>, <process.h>) y WMA_TEST_GETPID = _getpid en Windows; getpid en POSIX: solo el nombre unico del archivo temporal
+fuera | core/tests/test_mapped_file.cpp | if defined(_WIN32) | envuelve los tests solo-windows AC_061_2_WindowsRefusesTheFdPath y AC_061_2_WindowsLoadFromFdReturnsFalseAndNamesTheReason (declarados abajo como `solo-windows`)
+fuera | core/tests/test_offline_handle.cpp | if defined(__APPLE__) | include de <mach/mach.h> para footprintMb()
+fuera | core/tests/test_offline_handle.cpp | if defined(__APPLE__) | footprintMb(): phys_footprint con task_info en macOS, -1.0 en el resto; solo lo usa la medicion a pedido (WMA_MEASURE_OFFLINE_MEMORY=1, skip `ambiente`), ninguna asercion de un test que corre
+fuera | core/tests/test_soundfont_load.cpp | if defined(_WIN32) | includes (<io.h>, <process.h>, fcntl) del fixture TempSf2File
+fuera | core/tests/test_soundfont_load.cpp | if defined(_WIN32) | pid del nombre del SF2 temporal (_getpid / getpid)
+fuera | core/tests/test_soundfont_load.cpp | if defined(_WIN32) | abre el fd del SF2 temporal: _wopen(O_RDONLY|O_BINARY) en Windows, open en POSIX; el fd solo lo usa LoadFromFdAppliesTheRateItIsGiven (declarado)
+fuera | core/tests/test_soundfont_load.cpp | if defined(_WIN32) | cierra el fd: _close en Windows, close en POSIX
+fuera | core/tests/test_utf8_paths.cpp | if defined(_WIN32) | includes (<process.h>) y WMA_TEST_GETPID = _getpid en Windows; getpid en POSIX
+fuera | core/tests/test_utf8_paths.cpp | if defined(_WIN32) | envuelve el test solo-windows Utf8PathTest.AC_061_3_WindowsAnInvalidUtf8PathFailsClosed (declarado abajo como `solo-windows`)
+fuera | looper/tests/support/FixturePath.h | if defined(_WIN32) | include de <process.h> y WMA_TEST_GETPID = _getpid en Windows; getpid en POSIX: solo el nombre unico del archivo temporal
+fuera | looper/tests/test_audio_looper.cpp | if !defined(_WIN32) | include de <poll.h>, que Windows no tiene; solo lo usa el FIFO de AudioLooper.Req055CaptureOfATakeDoesNotDropTheNextTake (declarado)
+fuera | looper/tests/test_audio_looper.cpp | if !defined(_WIN32) | req055Drain: helper de FIFO (fcntl, read) que solo usa AudioLooper.Req055CaptureOfATakeDoesNotDropTheNextTake (declarado)
+fuera | tests/support/ThreadCpu.h | if defined(_WIN32) | include de <windows.h> para QueryThreadCycleTime
+fuera | tests/support/ThreadCpu.h | if defined(_WIN32) | threadCpuNs(): CPU del hilo en ns; QueryThreadCycleTime calibrado en Windows (GetThreadTimes avanza de a 15,6 ms y haria saltar el limite de "un periodo"), clock_gettime en POSIX. Mide lo mismo con otro reloj: las aserciones y sus limites son los mismos
+fuera | tests/support/WindowsNotRun.h | if defined(_WIN32) | define WMA_WINDOWS_NOT_RUN: GTEST_SKIP con el marcador en Windows, no-op en el resto (es la macro de este listado)
 
 # --- solo-windows: existen unicamente en Windows (las garantias que POSIX da por la API del SO) ---
 solo-windows | test_wav_dump_windows.cpp | AC-061.4: junction, symlink, reparse point ajeno, no pisar y borrar solo lo creado; en POSIX las dan O_EXCL|O_NOFOLLOW, link(2) y lstat() y las cubre WavSinkTest
