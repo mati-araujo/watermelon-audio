@@ -1,0 +1,42 @@
+# Tests que se registran en Windows y salen SKIPPED con `[windows-not-run]` (REQ-061 AC-061.1).
+# Una linea por test: `Suite.Test | razon`. Lo agrega quien pone WMA_WINDOWS_NOT_RUN("razon") en el test
+# (tests/support/WindowsNotRun.h); scripts/check-windows-not-run.py exige que listado y macro coincidan,
+# y que la corrida en Windows saltee exactamente estos. Un test que PUEDE correr en Windows no va aca.
+# Ademas de `Suite.Test | razon`, el listado declara (scripts/check-windows-not-run.py, cada entrada con razon y
+# trinquete en las dos direcciones: si sobra o falta, rojo):
+#   variante | Suite.Test | razon    el test corre en las dos plataformas pero su CUERPO tiene un #if de plataforma
+#   ambiente | <prefijo> | razon     un skip de AMBIENTE en la corrida de Windows: el prefijo exacto de su mensaje
+#   cmake | ruta | razon             un CMake de tests con una condicion de plataforma que excluye o filtra algo
+#   solo-windows | nombre | razon    un test (Suite.Test) o una fuente (archivo.cpp) que existe SOLO en Windows
+AudioLooper.Req055CaptureOfATakeDoesNotDropTheNextTake | FIFO (mkfifo) + poll + fcntl: el solapamiento se fuerza con un pipe POSIX que no existe en Windows
+SoundFontLoadTest.LoadFromFdAppliesTheRateItIsGiven | loadFromFd (fd + mmap de una sub-region) no existe en Windows: devuelve false por diseno
+MappedFileTest.AC_061_2_PosixMapsAnUnalignedSubRegionOfAnFd | mapFdRegion (fd + mmap de una sub-region) no existe en Windows: ahi lo cubre AC_061_2_WindowsRefusesTheFdPath
+MappedFileTest.AC_061_2_PosixRejectsARegionOutsideTheFileAndABadFd | mapFdRegion (fd + mmap de una sub-region) no existe en Windows: ahi lo cubre AC_061_2_WindowsRefusesTheFdPath
+WavSinkTest.Hallazgo1_ASymlinkAtThePartIsNeverFollowed | el symlink exige privilegio en Windows (SeCreateSymbolicLinkPrivilege); ahi lo cubre WavDumpWindowsTest.AC_061_4_ASymlinkAtThePartIsNeverFollowed
+WavSinkTest.BugB_AnAbortResidueBelongsOnlyToTheTakeThatLeftIt | el hilo escritor de la toma viva tiene el .part abierto con share mode 0: en Windows ni se renombra ni se borra, y la premisa (un .part ajeno bajo una toma que sigue viva) no se puede armar; el sink solo, sin hilo, lo cubre WavDumpWindowsTest.AC_061_4_AbortNeverRemovesAPartItDidNotCreate
+
+# --- variantes: la PREMISA o el estimulo cambia en Windows, la asercion no ---
+variante | WavSinkTest.BugB_AbortPartNeverRemovesAFileItDidNotCreate | en POSIX el .part ajeno se arma con std::rename encima del .part vivo; en Windows (share mode 0) se arma haciendo fallar finishPart contra un destino ocupado, que cierra el archivo, y reemplazando el .part cerrado. Las aserciones son las mismas
+variante | OutputProfiles.ProtectedIsTheTwoTwentyThreeOutputBitForBit | el golden de 2.23.0 es de macOS arm64 (otra libm da otro ultimo bit): solo ahi se ejecuta, en el resto sale SKIPPED con el mensaje declarado como `ambiente`; la prueba estructural cubre el resto
+
+# --- ambiente: skips que dependen de lo que hay instalado o del build, no de la plataforma ---
+ambiente | ERROR_PRIVILEGE_NOT_HELD: crear symlinks | crear un symlink pide modo desarrollador o SeCreateSymbolicLinkPrivilege; la junction y el reparse point ajeno (sin privilegio) cubren lo mismo
+ambiente | el costo se mide en un build optimizado | tests de costo: la suite del gate es Debug (igual en POSIX)
+ambiente | golden de 2.23.0 capturado en macOS arm64 | ver la variante OutputProfiles.ProtectedIsTheTwoTwentyThreeOutputBitForBit
+ambiente | medicion a pedido: WMA_MEASURE_OFFLINE_MEMORY=1 | medicion a pedido, apagada por defecto en todas las plataformas
+ambiente | sin AC4_OUT_DIR | herramienta que escribe WAV solo si se le da un directorio
+ambiente | sin GeneralUser_GS.sf3 | el SoundFont de NoisyPad no esta en el checkout (WMA_GENERALUSER_SF3)
+ambiente | sin corpus grabado (ausente o manifiesto vacio) | el corpus se baja con scripts/fetch-corpus.sh (release corpus-v1) y esta maquina no lo tiene; sin el, SKIPPED y nunca passed
+ambiente | sin el material del spec-test | se baja con scripts/fetch-spec-test.sh
+ambiente | sin la toma real del g42 | la toma real no se versiona (corpus-g42-manifest.txt)
+ambiente | sin material del spec-test | se baja con scripts/fetch-spec-test.sh
+
+# --- cmake: condiciones de plataforma en los CMake de tests ---
+cmake | usb/tests/libusb/CMakeLists.txt | return() bajo if(WIN32): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+cmake | core/tests/CMakeLists.txt | EXCLUDE_FROM_ALL de sf_render_preset: una herramienta de medicion a pedido (REQ-040), no un test
+
+# --- solo-windows: existen unicamente en Windows (las garantias que POSIX da por la API del SO) ---
+solo-windows | test_wav_dump_windows.cpp | AC-061.4: junction, symlink, reparse point ajeno, no pisar y borrar solo lo creado; en POSIX las dan O_EXCL|O_NOFOLLOW, link(2) y lstat() y las cubre WavSinkTest
+solo-windows | MappedFileTest.AC_061_2_WindowsRefusesTheFdPath | mapFdRegion no existe en Windows: el test fija que falla cerrado
+solo-windows | MappedFileTest.AC_061_2_WindowsLoadFromFdReturnsFalseAndNamesTheReason | idem para loadFromFd
+solo-windows | Utf8PathTest.AC_061_3_WindowsAnInvalidUtf8PathFailsClosed | en POSIX los bytes van tal cual al SO; en Windows se convierten y un UTF-8 invalido no abre nada

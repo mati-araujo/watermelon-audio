@@ -79,7 +79,7 @@ target_compile_definitions(looper_tests PRIVATE _USE_MATH_DEFINES
     WMA_LOOPER_TESTDATA_DIR="${LOOPER_TESTDATA_DIR}")
 
 include(GoogleTest)
-gtest_discover_tests(looper_tests)
+wma_gtest_discover_tests(looper_tests)
 
 # ----------------------------------------------------------------------------
 # looper_tests_dense — the SAME suite compiled with WM_LOOPER_DENSE_BUFFER, so the
@@ -111,7 +111,7 @@ target_link_libraries(looper_tests_dense PRIVATE GTest::gtest_main)
 target_compile_definitions(looper_tests_dense PRIVATE
     _USE_MATH_DEFINES WM_LOOPER_DENSE_BUFFER
     WMA_LOOPER_TESTDATA_DIR="${LOOPER_TESTDATA_DIR}")
-gtest_discover_tests(looper_tests_dense)
+wma_gtest_discover_tests(looper_tests_dense)
 
 # ----------------------------------------------------------------------------
 # bench_mix_into — standalone micro-benchmark for TrackBuffer::mixInto (F0).

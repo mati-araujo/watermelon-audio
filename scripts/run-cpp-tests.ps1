@@ -23,6 +23,16 @@
     Delete the build directory before configuring (forces a fresh build;
     the googletest download in .deps is kept).
 
+.PARAMETER Jobs
+    ctest -j: tests in parallel (default: the CTEST_JOBS environment variable, else the number of logical
+    processors; the same default as run-cpp-tests.sh). Serial took ~1200 s for the whole suite. Each
+    test is its own process with its own temp names, so they do not share state; lower it to debug a
+    flake, never raise a timeout.
+
+.PARAMETER Fast
+    Skip Stress/Slow tests. Like -Filter it runs fewer tests, so the not-run
+    check tolerates listed tests that do not show up (--partial).
+
 .EXAMPLE
     pwsh scripts/run-cpp-tests.ps1
     pwsh scripts/run-cpp-tests.ps1 -Filter UsbDescriptorParser
@@ -32,10 +42,15 @@
 param(
     [string]$Filter,
     [switch]$Clean,
-    [switch]$Fast
+    [switch]$Fast,
+    [int]$Jobs = 0
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Jobs -le 0) {
+    $Jobs = if ($env:CTEST_JOBS) { [int]$env:CTEST_JOBS } else { [int]$env:NUMBER_OF_PROCESSORS }
+}
+if ($Jobs -le 0) { $Jobs = 4 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'audio\src\main\cpp\tests'
@@ -112,7 +127,12 @@ if ($Clean -and (Test-Path $BuildDir)) {
 # backslash is an escape ('C:\msys64\mingw64' -> "Invalid character escape
 # '\m'"). Forward slashes are valid Windows paths and survive that.
 $ninjaBin, $gxx, $gcc, $DepsDir = @($ninjaBin, $gxx, $gcc, $DepsDir) | ForEach-Object { $_ -replace '\\', '/' }
+# Each gtest writes its own XML under $ResultsDir/<target>/ (wma_gtest_discover_tests, XML_OUTPUT_DIR): the
+# results scripts/check-windows-not-run.py reads (AC-061.1). Set at configure time because ctest bakes it
+# into the per-test command line.
+$ResultsDir = Join-Path $BuildDir 'gtest-xml'
 & $cmakeBin -S $SrcDir -B $BuildDir -G Ninja `
+    -DWMA_GTEST_XML_DIR="$($ResultsDir -replace '\\', '/')" `
     -DCMAKE_BUILD_TYPE=Debug `
     -DCMAKE_MAKE_PROGRAM="$ninjaBin" `
     -DCMAKE_CXX_COMPILER="$gxx" `
@@ -125,12 +145,36 @@ if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)." }
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
 
 # ---- test ---------------------------------------------------------------
+# Cada TEST es un test de ctest (gtest_discover_tests) y por tanto un PROCESO que escribe su propio XML
+# (<ResultsDir>/<target>/<Suite>.<Test>.xml, nombre propio: ctest en paralelo no los pisa). Esos XML son lo
+# que lee scripts/check-windows-not-run.py (AC-061.1); se borran antes para que no quede nada de otra corrida.
+if (Test-Path $ResultsDir) { Remove-Item -Recurse -Force $ResultsDir }
+New-Item -ItemType Directory -Force -Path $ResultsDir | Out-Null
+
 $ctestBin = Join-Path (Split-Path -Parent $cmakeBin) 'ctest.exe'
-$ctestArgs = @('--test-dir', $BuildDir, '--output-on-failure')
+$ctestArgs = @('--test-dir', $BuildDir, '--output-on-failure', '-j', $Jobs)
 if ($Filter) { $ctestArgs += @('-R', $Filter) }
 # -Fast: skip slow stress tests (name contains Stress/Slow) for a tight
 # edit -> test loop. They still run in CI and in an unflagged local run.
 if ($Fast) { $ctestArgs += @('-E', 'Stress|Slow') }
 
+Write-Host "ctest -j $Jobs"
+$ctestWatch = [System.Diagnostics.Stopwatch]::StartNew()
 & $ctestBin @ctestArgs
-exit $LASTEXITCODE
+$ctestExit = $LASTEXITCODE
+Write-Host ("ctest wall time: {0:N0} s" -f $ctestWatch.Elapsed.TotalSeconds)
+
+# ---- el trinquete de lo que no corre en Windows --------------------------
+# Corre SIEMPRE, tambien con ctest en rojo: un rojo no puede ocultar que el listado se desfaso.
+# -Filter/-Fast corren menos tests a proposito: ahi un test del listado puede no aparecer (--partial);
+# un test que corrio y fallo, o un skip sin declarar, falla igual.
+$python = Find-First -OnPath 'python' -Candidates @()
+if (-not $python) { $python = Find-First -OnPath 'python3' -Candidates @() }
+if (-not $python) { throw "python not found: scripts/check-windows-not-run.py needs it (AC-061.1)." }
+$checkArgs = @((Join-Path $RepoRoot 'scripts\check-windows-not-run.py'), '--results', $ResultsDir)
+if ($Filter -or $Fast) { $checkArgs += '--partial' }
+& $python @checkArgs
+$checkExit = $LASTEXITCODE
+
+if ($ctestExit -ne 0) { exit $ctestExit }
+exit $checkExit

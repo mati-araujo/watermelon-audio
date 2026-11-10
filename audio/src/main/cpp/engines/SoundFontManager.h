@@ -8,13 +8,9 @@
 #include <string>
 #include <vector>
 #include "../platform/Logger.h"
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
+#include "../platform/MappedFile.h"
 #include "tsf.h"
 #include "tsf_ext.h"
-#include "SoundFontFdRegion.h"
 #include "SoundFontModulatorTable.h"
 
 #ifndef SFM_LOG_TAG
@@ -22,17 +18,6 @@
 #endif
 #define SFM_LOGI(...) wma::logMessage(wma::LogLevel::INFO, SFM_LOG_TAG, __VA_ARGS__)
 #define SFM_LOGE(...) wma::logMessage(wma::LogLevel::ERROR, SFM_LOG_TAG, __VA_ARGS__)
-
-// Darwin has no mmap64/off64_t: there off_t is unconditionally 64-bit, so plain
-// mmap already gives what the *64 variants give on the 32-bit Android ABIs.
-// See loadFromFd() for why a 64-bit offset is required in the first place.
-#if defined(__APPLE__)
-#define WMA_MMAP ::mmap
-using WmaMapOffset = ::off_t;
-#else
-#define WMA_MMAP ::mmap64
-using WmaMapOffset = ::off64_t;
-#endif
 
 /**
  * Lo que el thread de audio toma de una vez: el `tsf` y SU tabla de moduladores
@@ -114,42 +99,16 @@ public:
     bool loadFromPath(const char* path, int32_t sampleRate) {
         std::lock_guard<std::mutex> lock(mLoadMutex);
 
-        // Open file
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) {
-            SFM_LOGE("[SF8] loadFromPath: failed to open %s (errno=%d)", path, errno);
-            return false;
-        }
-
-        // Get file size
-        struct stat st{};
-        if (fstat(fd, &st) < 0) {
-            SFM_LOGE("[SF8] loadFromPath: fstat failed (errno=%d)", errno);
-            close(fd);
-            return false;
-        }
-        size_t fileSize = static_cast<size_t>(st.st_size);
-
-        // mmap the file — read-only, private (copy-on-write if needed)
-        void* mapped = mmap(nullptr, fileSize, PROT_READ, MAP_PRIVATE, fd, 0);
-        close(fd); // fd can be closed after mmap
-
-        if (mapped == MAP_FAILED) {
-            SFM_LOGE("[SF8] loadFromPath: mmap failed for %zu bytes (errno=%d)", fileSize, errno);
-            return false;
-        }
-
-        // Advise kernel: we'll read sequentially (improves readahead)
-        madvise(mapped, fileSize, MADV_SEQUENTIAL);
-
-        SFM_LOGI("[SF8] loadFromPath: mmap'd %zu bytes from %s", fileSize, path);
+        wma::platform::MappedFile file = wma::platform::MappedFile::mapPath(path);
+        if (!file.isMapped()) return false;
 
         // Parse SF2 from mmap'd memory — tsf copies what it needs internally
-        ActiveFont* font = parseFont(mapped, fileSize);
+        ActiveFont* font = parseFont(file.bytes(), file.byteCount());
+        const size_t fileSize = file.byteCount();
 
         // Release mmap — tsf has its own copy of parsed data, and so does the
         // modulator table (REQ-039: los bytes no sobreviven a la carga).
-        munmap(mapped, fileSize);
+        file.release();
 
         if (!font) {
             SFM_LOGE("[SF8] loadFromPath: tsf_load_memory failed");
@@ -182,70 +141,23 @@ public:
      * mmap requires a page-aligned offset; AssetFileDescriptor offsets are not.
      * We align down and map a slightly larger region — see SoundFontFdRegion.h.
      *
+     * Windows: always returns false with a log. The JVM does not hand out CRT file
+     * descriptors there; load by path (see platform/MappedFile.h).
+     *
      * NOT RT-safe — call from background/JNI thread.
      */
     bool loadFromFd(int fd, int64_t offset, int64_t length, int32_t sampleRate) {
         std::lock_guard<std::mutex> lock(mLoadMutex);
 
-        if (fd < 0) {
-            SFM_LOGE("[SF8] loadFromFd: invalid fd=%d", fd);
-            return false;
-        }
-
-        // Validate the region against the actual file size.
-        struct stat st{};
-        if (fstat(fd, &st) < 0) {
-            SFM_LOGE("[SF8] loadFromFd: fstat failed (fd=%d, errno=%d)", fd, errno);
-            return false;
-        }
-
-        wma::MmapRegion region{};
-        const long pageSize = sysconf(_SC_PAGE_SIZE);
-        if (!wma::computeSoundFontMmapRegion(static_cast<int64_t>(st.st_size),
-                                             offset, length,
-                                             static_cast<int64_t>(pageSize),
-                                             region)) {
-            SFM_LOGE("[SF8] loadFromFd: region out of range "
-                     "(offset=%lld, length=%lld, fileSize=%lld)",
-                     static_cast<long long>(offset),
-                     static_cast<long long>(length),
-                     static_cast<long long>(st.st_size));
-            return false;
-        }
-
-        // mmap the page-aligned region — read-only, private.
-        // A 64-bit offset is mandatory here: off_t is 32-bit on the 32-bit
-        // ABIs (armeabi-v7a, x86), which would truncate a large asset offset.
-        // loadFromPath is immune (it always maps at offset 0); this path takes
-        // an arbitrary offset. WMA_MMAP resolves to mmap64 where that matters
-        // and to plain mmap on Darwin, where off_t is already 64-bit.
-        void* mapped = WMA_MMAP(nullptr, static_cast<size_t>(region.mapLength),
-                                PROT_READ, MAP_PRIVATE, fd,
-                                static_cast<WmaMapOffset>(region.alignedOffset));
-        if (mapped == MAP_FAILED) {
-            SFM_LOGE("[SF8] loadFromFd: mmap failed for %lld bytes at offset %lld (errno=%d)",
-                     static_cast<long long>(region.mapLength),
-                     static_cast<long long>(region.alignedOffset), errno);
-            return false;
-        }
-
-        // Advise kernel: we'll read sequentially (improves readahead)
-        madvise(mapped, static_cast<size_t>(region.mapLength), MADV_SEQUENTIAL);
-
-        // SF data starts `dataDelta` bytes into the (page-aligned) mapping.
-        const uint8_t* sfData =
-            static_cast<const uint8_t*>(mapped) + region.dataDelta;
-
-        SFM_LOGI("[SF8] loadFromFd: mmap'd %lld bytes (fd=%d, offset=%lld)",
-                 static_cast<long long>(length), fd,
-                 static_cast<long long>(offset));
+        wma::platform::MappedFile region = wma::platform::MappedFile::mapFdRegion(fd, offset, length);
+        if (!region.isMapped()) return false;
 
         // Parse SF2/SF3 from the mmap'd memory — tsf copies what it needs.
-        ActiveFont* font = parseFont(sfData, static_cast<size_t>(length));
+        ActiveFont* font = parseFont(region.bytes(), region.byteCount());
 
         // Release mmap — tsf has its own copy of parsed data, and so does the
         // modulator table.
-        munmap(mapped, static_cast<size_t>(region.mapLength));
+        region.release();
 
         if (!font) {
             SFM_LOGE("[SF8] loadFromFd: tsf_load_memory failed");

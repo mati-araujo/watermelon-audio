@@ -59,4 +59,4 @@ target_compile_definitions(effects_tests PRIVATE
 target_link_libraries(effects_tests PRIVATE watermelon-effects GTest::gtest_main)
 
 include(GoogleTest)
-gtest_discover_tests(effects_tests)
+wma_gtest_discover_tests(effects_tests)

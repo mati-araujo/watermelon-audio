@@ -105,11 +105,18 @@ set(WMA_DESKTOP_SOURCES
 if(APPLE)
     list(APPEND WMA_DESKTOP_SOURCES
         ${WMA_CPP_ROOT}/platform/PlatformApple.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFilePosix.cpp
         ${WMA_CPP_ROOT}/backends/CoreAudioBackend.mm)
     set_source_files_properties(${WMA_CPP_ROOT}/backends/CoreAudioBackend.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+elseif(WIN32)
+    list(APPEND WMA_DESKTOP_SOURCES
+        ${WMA_CPP_ROOT}/platform/PlatformWindows.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFileWindows.cpp)
 else()
-    list(APPEND WMA_DESKTOP_SOURCES ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp)
+    list(APPEND WMA_DESKTOP_SOURCES
+        ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFilePosix.cpp)
 endif()
 
 add_library(watermelon_audio SHARED ${WMA_DESKTOP_SOURCES})

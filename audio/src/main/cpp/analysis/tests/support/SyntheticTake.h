@@ -7,7 +7,7 @@
  * datos son float32 mono. Lo que se lee de vuelta lo lee un parser PROPIO (`parseWmadV2Chunk`), no
  * `InputDumpStats`: si el escritor y el lector compartieran codigo, un error en los dos no se veria.
  *
- * Los archivos van SIEMPRE a temporales (`/tmp/wma-corpus-*`, `corpus::makeTempDir`): nada de esto
+ * Los archivos van SIEMPRE a temporales (`<tmp>/wma-corpus-*`, `corpus::makeTempDir`): nada de esto
  * se commitea, y en particular nunca `tests/corpus-g42-manifest.txt` (su aparicion hace FALLAR
  * `LatchInstrumentRealTake` a proposito).
  */

@@ -21,6 +21,7 @@
 
 #include "../TunerInputDump.h"
 #include "../WavFileDumpSink.h"
+#include "tests/support/WindowsNotRun.h"
 
 #include <gtest/gtest.h>
 
@@ -308,6 +309,8 @@ TEST_F(WavSinkTest, Hallazgo1_APreexistingPartIsNeverTruncatedAndTheOpenFails) {
  * (lo trunca) o lo crea donde apunta. Mutantes que mata: abrir sin `O_EXCL` y sin `O_NOFOLLOW`.
  */
 TEST_F(WavSinkTest, Hallazgo1_ASymlinkAtThePartIsNeverFollowed) {
+    WMA_WINDOWS_NOT_RUN("el symlink exige privilegio en Windows (SeCreateSymbolicLinkPrivilege); ahi lo cubre WavDumpWindowsTest.AC_061_4_ASymlinkAtThePartIsNeverFollowed");
+#if !defined(_WIN32)
     const std::string victim = pathOf("victima.bin");
     writeBytes(victim, kForeign);
     const std::string path = pathOf("toma.wav");
@@ -326,6 +329,7 @@ TEST_F(WavSinkTest, Hallazgo1_ASymlinkAtThePartIsNeverFollowed) {
     ASSERT_FALSE(ec);
     EXPECT_FALSE(sink.openPart(path2, kInputDumpHeaderBytes)) << "siguio un symlink colgante";
     EXPECT_FALSE(exists(ghost)) << "el open creo el archivo al que apuntaba el symlink colgante";
+#endif  // !_WIN32
 }
 
 /**
@@ -580,10 +584,21 @@ TEST_F(WavSinkTest, BugB_AbortPartNeverRemovesAFileItDidNotCreate) {
     WavFileDumpSink sink;
     ASSERT_TRUE(sink.openPart(path, kInputDumpHeaderBytes));
 
+#if defined(_WIN32)
+    // Variante de la PREMISA (las aserciones de abajo son las mismas): el `.part` vivo se abre con share
+    // mode 0, y Windows no deja renombrar encima ni borrarlo. Se arma un `.part` ajeno por la otra
+    // puerta: un destino ocupado hace fallar a `finishPart`, que CIERRA el archivo y deja `mPath`.
+    { std::ofstream(path, std::ios::binary) << "destino"; }
+    const auto header = headerFor(0, false);
+    ASSERT_TRUE(sink.finishPart(header.data(), header.size(), true).empty()) << "premisa: el destino ocupado";
+    ASSERT_TRUE(fs::remove(path + ".part")) << "premisa: el .part cerrado de la toma";
+    { std::ofstream(path + ".part", std::ios::binary) << "no es de la toma"; }
+#else
     const std::string foreign = pathOf("ajeno.bin");
     { std::ofstream(foreign, std::ios::binary) << "no es de la toma"; }
     ASSERT_EQ(std::rename(foreign.c_str(), (path + ".part").c_str()), 0)
         << "premisa: el .part de la toma quedo reemplazado por un archivo ajeno";
+#endif
 
     EXPECT_FALSE(sink.abortPart()) << "el nombre lo ocupa un archivo ajeno: no se borra, y se dice";
     ASSERT_TRUE(exists(path + ".part")) << "se borro un archivo que el sink no creo";
@@ -694,6 +709,8 @@ TEST_F(WavSinkTest, BugB_AbortTakeJoinsTheWriterBeforeRemovingThePart) {
  * Mutante que mata: no limpiar el residuo al entrar a `beginTake`.
  */
 TEST_F(WavSinkTest, BugB_AnAbortResidueBelongsOnlyToTheTakeThatLeftIt) {
+    WMA_WINDOWS_NOT_RUN("el hilo escritor de la toma viva tiene el .part abierto con share mode 0: en Windows ni se renombra ni se borra, y la premisa (un .part ajeno bajo una toma que sigue viva) no se puede armar; el sink solo, sin hilo, lo cubre WavDumpWindowsTest.AC_061_4_AbortNeverRemovesAPartItDidNotCreate");
+#if !defined(_WIN32)
     const std::string path = pathOf("residuo.wav");
     TunerInputDump dump;
     ASSERT_TRUE(dump.beginTake(std::make_unique<WavFileDumpSink>(), path, 0));
@@ -706,5 +723,6 @@ TEST_F(WavSinkTest, BugB_AnAbortResidueBelongsOnlyToTheTakeThatLeftIt) {
 
     EXPECT_FALSE(dump.beginTake(std::make_unique<WavFileDumpSink>(), pathOf("no/existe/b.wav"), 0));
     EXPECT_EQ(dump.abortResidue(), "") << "un start que no abrio nada heredo el residuo de otra toma";
+#endif  // !_WIN32
 }
 

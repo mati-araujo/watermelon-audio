@@ -12,6 +12,7 @@
 // ============================================================================
 #include "tests/support/TestWait.h"
 #include "support/FixturePath.h"
+#include "tests/support/PathUtf8.h"
 
 #include <gtest/gtest.h>
 #include "AudioLooper.h"
@@ -58,7 +59,7 @@ public:
 
     std::string write(const std::string& name, int frames,
                       const std::function<float(int, int)>& sample, int rate = kSR) {
-        const auto path = wma_test::fixturePath("song_" + name + ".wav");
+        const wma_test::Utf8Path path = wma_test::fixturePath("song_" + name + ".wav");
         std::vector<float> buf(static_cast<size_t>(frames) * 2);
         for (int n = 0; n < frames; ++n) {
             buf[static_cast<size_t>(n) * 2] = sample(n, 0);

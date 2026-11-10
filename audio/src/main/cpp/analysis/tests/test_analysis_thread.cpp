@@ -962,6 +962,15 @@ struct OverrunObservation {
  * SIN esperar lugar. Es lo contrario de `feedAtAnalysisPace`, y reproduce el
  * mecanismo que la spec de REQ-009 declara real.
  */
+#if defined(_WIN32)
+// 8 bloques son exactamente kCapacityFrames: el ring solo se pisa si el analisis NO drena durante la
+// rafaga. En Windows (Debug, hilos de 15,6 ms de quantum) drena y el test no reproduce su premisa ~40 %
+// de las veces; con 16 se pisa siempre. POSIX queda en 8, que es lo que se midio.
+constexpr int kOverrunBlocksPerTick = 16;
+#else
+constexpr int kOverrunBlocksPerTick = 8;
+#endif
+
 OverrunObservation feedOverrunning(AnalysisRing& ring, AnalysisSnapshot& snap,
                                    double f0, int k, int iterations) {
     OverrunObservation obs;
@@ -1051,7 +1060,7 @@ TEST(AnalysisThreadReq009, WhatIsPublishedAsConvergedWhileTheRingOverrunsActuall
     th.setTargetHz(kReq009Target);
     th.start(kRate);
 
-    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, kOverrunBlocksPerTick, 150);
     th.stop();
 
     ASSERT_GT(obs.samples, 0)
@@ -1137,7 +1146,7 @@ TEST(AnalysisThreadReq009, AGapIsDistinguishableFromNotConvergedYet) {
         AnalysisThread th(ring, snap);
         th.setTargetHz(kReq009Target);
         th.start(kRate);
-        broken = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+        broken = feedOverrunning(ring, snap, kReq009Real, kOverrunBlocksPerTick, 150);
         th.stop();
     }
 
@@ -1191,7 +1200,7 @@ TEST(AnalysisThreadReq009, TheMarkClearsAndTheReadingConvergesOnceTheInputIsWhol
     th.setTargetHz(kReq009Target);
     th.start(kRate);
 
-    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, kOverrunBlocksPerTick, 150);
     ASSERT_GT(obs.samples, 0) << "el desbordador no desbordo";
     ASSERT_GT(obs.markUpSamples, 0)
         << "la premisa de este test es que la marca llego a estar ARRIBA mientras se "

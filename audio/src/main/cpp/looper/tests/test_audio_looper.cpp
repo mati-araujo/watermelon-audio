@@ -11,6 +11,7 @@
 // which works on the host. No Oboe / JNI / device needed.
 // ============================================================================
 #include "tests/support/TestWait.h"
+#include "tests/support/WindowsNotRun.h"
 #include "support/FixturePath.h"
 
 #include <gtest/gtest.h>
@@ -26,7 +27,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <poll.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fstream>
@@ -775,6 +778,7 @@ namespace {
 // Valor conocido por frame: un frame perdido o corrido no puede dar el mismo valor.
 float req055Ramp(int i) { return static_cast<float>((i % 1000) + 1) / 2000.0f; }
 
+#if !defined(_WIN32)
 // Lee el FIFO hasta que el escritor lo cierra. Devuelve los bytes leídos.
 size_t req055Drain(int fd) {
     const int flags = fcntl(fd, F_GETFL);
@@ -789,10 +793,13 @@ size_t req055Drain(int fd) {
     }
     return total;
 }
+#endif  // !_WIN32
 
 }  // namespace
 
 TEST(AudioLooper, Req055CaptureOfATakeDoesNotDropTheNextTake) {
+    WMA_WINDOWS_NOT_RUN("FIFO (mkfifo) + poll + fcntl: el solapamiento se fuerza con un pipe POSIX que no existe en Windows");
+#if !defined(_WIN32)
     AudioLooper looper;
     looper.setSampleRate(kSR);
     looper.setTailMs(0);  // sin cola: la toma de B termina exactamente en kB frames
@@ -868,6 +875,7 @@ TEST(AudioLooper, Req055CaptureOfATakeDoesNotDropTheNextTake) {
         if (b.sampleAt(i, 0) != req055Ramp(i) || b.sampleAt(i, 1) != req055Ramp(i)) ++mismatches;
     }
     EXPECT_EQ(mismatches, 0) << "B tiene frames corridos o perdidos";
+#endif  // !_WIN32
 }
 
 // ======================= Quantized sync-arm =======================

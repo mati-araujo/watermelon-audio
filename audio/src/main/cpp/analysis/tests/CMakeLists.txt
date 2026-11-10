@@ -13,6 +13,13 @@ if(NOT TARGET watermelon-dsp)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../dsp ${CMAKE_BINARY_DIR}/dsp)
 endif()
 
+# Las primitivas de disco del volcado dependen del SO (REQ-061 AC-061.4): Win32 o POSIX.
+if(WIN32)
+    set(WMA_DUMP_FILE_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/DumpFileWindows.cpp)
+else()
+    set(WMA_DUMP_FILE_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/DumpFilePosix.cpp)
+endif()
+
 # El ring se compila DENTRO del ejecutable de test, no se linkea desde
 # `watermelon-analysis`: la compuerta de `WMA_TEST_HOOKS` tiene que estar
 # activa, y activarla en la libreria la metería en el artefacto que se publica.
@@ -61,6 +68,7 @@ add_executable(analysis_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisThread.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../TunerInputDump.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../WavFileDumpSink.cpp
+    ${WMA_DUMP_FILE_SOURCE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../SpectralSupportProbe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../OfflineAnalysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseSlopeEstimator.cpp
@@ -68,6 +76,11 @@ add_executable(analysis_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../InharmonicityEstimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../FastModeTracker.cpp
 )
+
+# AC-061.4: las garantias del dump en Windows (junction, symlink, no pisar). Solo existe ahi.
+if(WIN32)
+    target_sources(analysis_tests PRIVATE test_wav_dump_windows.cpp)
+endif()
 
 target_compile_definitions(analysis_tests PRIVATE
     WMA_TEST_HOOKS=1
@@ -86,4 +99,4 @@ target_include_directories(analysis_tests PRIVATE
 target_link_libraries(analysis_tests PRIVATE GTest::gtest_main)
 
 include(GoogleTest)
-gtest_discover_tests(analysis_tests)
+wma_gtest_discover_tests(analysis_tests)

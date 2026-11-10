@@ -24,7 +24,7 @@
  * Cada rechazo se prueba con UNA sola falta (si no, el rechazo podria venir de otro chequeo y quitar el
  * chequeo no se veria), y cada caso comprueba primero que el archivo SANO del mismo armado pasa.
  *
- * Los temporales van SIEMPRE a `corpus::makeTempDir()` (/tmp/wma-corpus-*); nunca se crea
+ * Los temporales van SIEMPRE a `corpus::makeTempDir()` (<tmp>/wma-corpus-*); nunca se crea
  * `tests/corpus-g42-manifest.txt`.
  */
 
