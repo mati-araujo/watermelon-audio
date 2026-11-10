@@ -156,6 +156,9 @@ jobs:
       # WA-0.4 — pure grep, no toolchain. Runs here rather than in the `ios`
       # job on purpose: macOS minutes cost 10x, and a forbidden include is just
       # as red when Linux says so.
+      - name: Portability guardrail — self-test (WA-0.4)
+        run: bash scripts/check-cpp-portability.sh --self-test
+
       - name: Portability guardrail (WA-0.4)
         run: bash scripts/check-cpp-portability.sh
 
