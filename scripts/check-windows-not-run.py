@@ -14,7 +14,9 @@ forma, sin tipo, es `Suite.Test | razon`):
                                       `WMA_WINDOWS_NOT_RUN("razon")`, `tests/support/WindowsNotRun.h`)
   variante | Suite.Test | razon       el cuerpo del test tiene un `#if` sobre una macro de plataforma y
                                       el test SI corre en las dos: cambia la premisa o el estimulo,
-                                      no la asercion
+                                      no la asercion; o, por decision registrada (REQ-061 D13),
+                                      deja de evaluar una asercion que en esa plataforma mide
+                                      ruido del SO; la razon nombra la decision y lo que si se evalua
   ambiente | <prefijo> | razon        un skip de AMBIENTE (corpus ausente, GeneralUser, Release-only...):
                                       el prefijo EXACTO del mensaje del GTEST_SKIP
   cmake | ruta | construccion | razon  UN hallazgo de CMake: un archivo de tests y la construccion
