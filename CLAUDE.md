@@ -78,6 +78,7 @@ citar** cualquier otro numero; por que, en `docs/dev/conteos-que-envejecen.md`.
 | googletest (suite de host) | ver `audio/src/main/cpp/thirdparty/googletest.cmake` |
 | Compose Multiplatform (sólo `:harness`) | ver `gradle/libs.versions.toml` |
 | Xcode del CI | ver la clave `xcode` de `.github/toolchain-pins.json` |
+| Windows (desktop) | MinGW-w64 UCRT64 (GCC), ver `_windows_cross` en `.github/toolchain-pins.json` |
 
 Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`. Las filas "ver" apuntan a la
 **unica fuente** del pin: `scripts/check-dep-pins.py` falla si un pin aparece en un segundo
@@ -89,7 +90,10 @@ lugar. Lo vendorizado y como buscar sus CVE: `audio/src/main/cpp/thirdparty/VEND
   `check-rt-safety.py`. Reglas y trampas: `audio/src/main/cpp/CLAUDE.md`.
 - **El thread RT jamas entra a Kotlin**; el estado sale por polling o colas lock-free.
 - **commonMain**: cero `android.*`/`java.*`. **Portabilidad C++**: `jni.h`/`android/` sólo en
-  `jni/`, `usb/`, `OboeBackend`, `LibusbBackend`, `PlatformAndroid.cpp`.
+  `jni/`, `usb/`, `OboeBackend`, `LibusbBackend`, `PlatformAndroid.cpp`. `windows.h` y las APIs
+  sólo-POSIX/sólo-Windows sólo en la capa declarada (`platform/`, los backends de su plataforma,
+  `usb/`, `jni/`): lo vigila `check-cpp-portability.sh` y la red es `windows-cross`. Los paths
+  `const char*` son UTF-8 y se abren por `platform/`.
 - **Tests**: nunca sincronizar con una duracion y afirmar despues (REQ-002); ver
   `audio/src/main/cpp/CLAUDE.md`.
 - **JNI**: tres preguntas (simbolo, firma, ejecucion), cada una con su gate; ver
@@ -132,6 +136,8 @@ bash scripts/gate.sh --with-sanitizers   # + ASan/UBSan local (opt-in, no atesta
                                          # con targets iOS. Correlo si tocas iosMain. Necesita
                                          # kotlin.mpp.enableCInteropCommonization (gradle.properties)
 bash scripts/run-cpp-tests.sh            # [gate] suite C++ de host; ctest imprime el total
+powershell -File scripts/run-cpp-tests.ps1   # la misma suite en la PC Windows (MSYS2 UCRT64)
+powershell -File scripts/gate-windows.ps1    # gate LOCAL de la PC Windows (suite, lint, DLL); no atesta
 bash scripts/build-ios.sh                # [gate] libwatermelon_audio.a, ambos slices + link
 bash scripts/build-harness.sh            # [gate] :harness Android + iOS + arranque de la app
 ./gradlew :audio:publishToMavenLocal     # NoisyPad local (o includeBuild en su settings)

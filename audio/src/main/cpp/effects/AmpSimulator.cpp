@@ -192,7 +192,8 @@ void AmpSimulator::updateFilterCoefficients() {
         return (value - 50.0f) * 0.24f;  // 50 -> 0dB, 0 -> -12dB, 100 -> +12dB
     };
 
-    float bassFreq, midFreq, trebleFreq;
+    // Valores del MARSHALL (el default de mToneStack): un enum fuera de rango no deja el switch sin escribir.
+    float bassFreq = 200.0f, midFreq = 1000.0f, trebleFreq = 3500.0f;
     getToneStackFrequencies(stackType, bassFreq, midFreq, trebleFreq);
 
     // Calculate filter coefficients

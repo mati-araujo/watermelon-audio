@@ -101,6 +101,18 @@ endif()
 # a query returns with no engine, the difference between the engine's default
 # fade and an explicit one — lives in watermelon_audio.cpp. Testing AudioEngine
 # alone would no longer cover it. See test_c_api_lifecycle.cpp.
+# La capa de plataforma de la suite de host: Windows (REQ-061) o POSIX. En macOS y Linux sigue siendo
+# PlatformAndroid.cpp, como siempre (ver el comentario de la lista).
+if(WIN32)
+    set(WMA_PLATFORM_OS_SOURCES
+        ${WMA_CPP_ROOT}/platform/PlatformWindows.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFileWindows.cpp)
+else()
+    set(WMA_PLATFORM_OS_SOURCES
+        ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFilePosix.cpp)
+endif()
+
 set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
     ${WMA_CPP_ROOT}/core/AudioEngine.cpp
@@ -115,11 +127,11 @@ set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
     ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
     ${WMA_CPP_ROOT}/platform/Logger.cpp
-    # Despite the name, this file is plain POSIX + inline asm with the only
+    # Despite the name, PlatformAndroid.cpp is plain POSIX + inline asm with the only
     # __ANDROID__ guard inside setAudioThreadPriority(). AudioEngine::start()
     # calls flushDenormals(), so the real implementation is compiled in rather
     # than stubbed — one less divergence between host and device behaviour.
-    ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp
+    ${WMA_PLATFORM_OS_SOURCES}
     ${WMA_CPP_ROOT}/backends/BackendManager.cpp
     ${WMA_CPP_ROOT}/backends/SplitBackend.cpp
     ${WMA_CPP_ROOT}/backends/DriftResampler.cpp
@@ -158,6 +170,8 @@ add_executable(core_tests
     test_c_api_synth.cpp
     test_c_api_engine_params.cpp
     test_soundfont_load.cpp
+    test_mapped_file.cpp
+    test_utf8_paths.cpp
     test_minimal_soundfont_modulators.cpp
     test_soundfont_note_on.cpp
     test_soundfont_default_two_identity.cpp
@@ -239,7 +253,7 @@ target_link_libraries(core_tests PRIVATE
 )
 
 include(GoogleTest)
-gtest_discover_tests(core_tests)
+wma_gtest_discover_tests(core_tests)
 
 # REQ-040, criterio de muerte (I-2): el render de host que produce el Δ_host = 1/1 − 0/0 por
 # preset. EXCLUDE_FROM_ALL a proposito: no es un test, no lo construye el gate ni el CI, y no

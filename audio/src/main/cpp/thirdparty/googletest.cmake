@@ -35,3 +35,15 @@ FetchContent_Declare(googletest
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
+
+# Registra los tests de `target` con ctest. Si WMA_GTEST_XML_DIR esta definido (lo pasa run-cpp-tests.ps1),
+# cada test escribe SU XML en <WMA_GTEST_XML_DIR>/<target>/<Suite>.<Test>.xml: con GTEST_OUTPUT y ctest en
+# paralelo, el "nombre unico" que elige gtest es chequear-y-despues-crear y los resultados se pueden perder.
+# El XML es lo que lee scripts/check-windows-not-run.py (REQ-061 AC-061.1).
+function(wma_gtest_discover_tests target)
+    if(WMA_GTEST_XML_DIR)
+        gtest_discover_tests(${target} XML_OUTPUT_DIR "${WMA_GTEST_XML_DIR}/${target}" ${ARGN})
+    else()
+        gtest_discover_tests(${target} ${ARGN})
+    endif()
+endfunction()

@@ -51,6 +51,8 @@
  */
 
 #include "support/MinimalSoundFont.h"
+#include "tests/support/PathUtf8.h"
+#include "tests/support/WindowsNotRun.h"
 
 #include "engines/SoundFontEngine.h"
 #include "engines/SoundFontManager.h"
@@ -66,8 +68,18 @@
 #include <string>
 #include <vector>
 
+#include <atomic>
+#include <filesystem>
+#include <fstream>
+
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 
 namespace wma_test {
 namespace {
@@ -80,24 +92,43 @@ class TempSf2File {
 public:
     explicit TempSf2File(const std::vector<uint8_t>& sf2, size_t prefixBytes = 0)
         : mOffset(prefixBytes) {
-        char tmpl[] = "/tmp/wma_sf2_XXXXXX";
-        mFd = ::mkstemp(tmpl);
-        mPath = tmpl;
-        if (mFd < 0) return;
-        if (prefixBytes > 0) {
-            // Basura antes del .sf2: modela un asset embebido en un APK, que es
-            // el caso real de loadFromFd en Android y el único que ejercita el
-            // alineado de la región de mmap de punta a punta.
-            std::vector<uint8_t> junk(prefixBytes, 0xAB);
-            ::write(mFd, junk.data(), junk.size());
+        static std::atomic<int> sCounter{0};
+#if defined(_WIN32)
+        const long long pid = _getpid();
+#else
+        const long long pid = getpid();
+#endif
+        mFsPath = std::filesystem::temp_directory_path() /
+                  ("wma_sf2_" + std::to_string(pid) + "_" + std::to_string(sCounter.fetch_add(1)));
+        mPath = pathUtf8(mFsPath);
+        {
+            std::ofstream out(mFsPath, std::ios::binary | std::ios::trunc);
+            if (!out) return;
+            if (prefixBytes > 0) {
+                // Basura antes del .sf2: modela un asset embebido en un APK, que es
+                // el caso real de loadFromFd en Android y el único que ejercita el
+                // alineado de la región de mmap de punta a punta.
+                const std::vector<char> junk(prefixBytes, static_cast<char>(0xAB));
+                out.write(junk.data(), static_cast<std::streamsize>(junk.size()));
+            }
+            out.write(reinterpret_cast<const char*>(sf2.data()), static_cast<std::streamsize>(sf2.size()));
+            if (!out) return;
         }
-        ::write(mFd, sf2.data(), sf2.size());
-        ::lseek(mFd, 0, SEEK_SET);
+#if defined(_WIN32)
+        mFd = ::_wopen(mFsPath.c_str(), _O_RDONLY | _O_BINARY);
+#else
+        mFd = ::open(mFsPath.c_str(), O_RDONLY);
+#endif
     }
 
     ~TempSf2File() {
+#if defined(_WIN32)
+        if (mFd >= 0) ::_close(mFd);
+#else
         if (mFd >= 0) ::close(mFd);
-        if (!mPath.empty()) ::unlink(mPath.c_str());
+#endif
+        std::error_code ec;
+        if (!mFsPath.empty()) std::filesystem::remove(mFsPath, ec);
     }
 
     int fd() const { return mFd; }
@@ -106,6 +137,7 @@ public:
 
 private:
     int mFd = -1;
+    std::filesystem::path mFsPath;
     std::string mPath;
     size_t mOffset = 0;
 };
@@ -155,6 +187,8 @@ TEST_F(SoundFontLoadTest, LoadFromPathAppliesTheRateItIsGiven) {
 }
 
 TEST_F(SoundFontLoadTest, LoadFromFdAppliesTheRateItIsGiven) {
+    WMA_WINDOWS_NOT_RUN("loadFromFd (fd + mmap de una sub-region) no existe en Windows: devuelve false por diseno");
+#if !defined(_WIN32)
     // Offset deliberadamente NO alineado a página: es el caso que
     // computeSoundFontMmapRegion existe para resolver, y hasta ahora sólo
     // estaba cubierto como aritmética pura (test_soundfont_fd_region.cpp).
@@ -167,6 +201,7 @@ TEST_F(SoundFontLoadTest, LoadFromFdAppliesTheRateItIsGiven) {
 
     EXPECT_EQ(mManager.getSampleRate(), 44100);
     EXPECT_EQ(mManager.getPresetCount(), 1);
+#endif  // !_WIN32
 }
 
 /**

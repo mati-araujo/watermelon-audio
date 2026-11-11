@@ -156,8 +156,19 @@ jobs:
       # WA-0.4 — pure grep, no toolchain. Runs here rather than in the `ios`
       # job on purpose: macOS minutes cost 10x, and a forbidden include is just
       # as red when Linux says so.
+      - name: Portability guardrail — self-test (WA-0.4)
+        run: bash scripts/check-cpp-portability.sh --self-test
+
       - name: Portability guardrail (WA-0.4)
         run: bash scripts/check-cpp-portability.sh
+
+      # REQ-061 AC-061.1 — lo que no corre en Windows se declara (python3 y nada mas). El --self-test primero,
+      # misma razon que los de abajo. El diff de registro (nm) lo corre windows-cross; los resultados, el .ps1.
+      - name: Lo que no corre en Windows esta declarado — self-test
+        run: python3 scripts/check-windows-not-run.py --self-test
+
+      - name: Lo que no corre en Windows esta declarado
+        run: python3 scripts/check-windows-not-run.py
 
       # WD-1.1 — mismo criterio que el de portabilidad: python3 y nada mas, y
       # una violacion de RT-safety es igual de roja dicha por Linux. El

@@ -103,6 +103,37 @@ constexpr const char* kSubsetNote =
 #endif
 
 // ---------------------------------------------------------------------------
+// El hash del corpus: vectores de FIPS 180-2 (REQ-061 S2)
+// ---------------------------------------------------------------------------
+/**
+ * `corpus::Sha256` reemplazo al binario `shasum` (que no existe en Windows). Un hash mal implementado
+ * lee un corpus INTACTO como corrupto (o uno corrupto como sano): se fija contra los vectores publicados.
+ *
+ * Bug que atrapa: un relleno o una longitud mal (448 bits cae justo en el limite que obliga a un
+ * segundo bloque), una constante o una rotacion mal, o una actualizacion incremental que pierde el
+ * resto de un bloque parcial (el millon de 'a' entra en trozos que no son multiplos de 64).
+ */
+TEST(CorpusGate, Sha256MatchesTheFipsVectors) {
+    const auto hexOf = [](const std::string& text) {
+        corpus::Sha256 h;
+        h.update(reinterpret_cast<const unsigned char*>(text.data()), text.size());
+        return h.hexDigest();
+    };
+    EXPECT_EQ(hexOf(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    EXPECT_EQ(hexOf("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    EXPECT_EQ(hexOf("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+              "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+
+    corpus::Sha256 million;
+    const std::string chunk(1000, 'a');
+    for (int i = 0; i < 1000; ++i) {
+        million.update(reinterpret_cast<const unsigned char*>(chunk.data()), 37);
+        million.update(reinterpret_cast<const unsigned char*>(chunk.data()) + 37, chunk.size() - 37);
+    }
+    EXPECT_EQ(million.hexDigest(), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+}
+
+// ---------------------------------------------------------------------------
 // 10.5 — sin corpus se SALTEA, no se aprueba
 // ---------------------------------------------------------------------------
 TEST(CorpusGate, WithoutTheCorpusTheDecisionIsSkipAndNeverPass) {

@@ -1,0 +1,5 @@
+# Baseline-TRINQUETE de check-cpp-portability.sh (REQ-061 AC-061.7).
+# Una violacion conocida por linea: `ruta-relativa-a-audio/src/main/cpp|API`, sin numeros de
+# linea (no se rompe al editar el archivo). Solo se achica: el lint falla si aparece una
+# violacion NO listada Y si una entrada ya no se reproduce. REQ-061 S2 la VACIA; su diff es la
+# revision. Nunca se agrega una entrada para acallar un rojo: se arregla el codigo.

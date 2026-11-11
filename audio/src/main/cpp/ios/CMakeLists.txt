@@ -118,6 +118,7 @@ add_library(watermelon-core STATIC
         ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
         ${WMA_CPP_ROOT}/platform/Logger.cpp
         ${WMA_CPP_ROOT}/platform/PlatformApple.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFilePosix.cpp
         ${WMA_CPP_ROOT}/backends/BackendManager.cpp
         ${WMA_CPP_ROOT}/backends/PlatformBackends.cpp
         ${WMA_CPP_ROOT}/backends/SplitBackend.cpp

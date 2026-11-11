@@ -187,6 +187,7 @@ set(MODE_SOURCES
 set(PLATFORM_SOURCES
         platform/Logger.cpp
         platform/PlatformAndroid.cpp
+        platform/MappedFilePosix.cpp
 )
 
 # C API (Phase 0C: audio lib extraction)

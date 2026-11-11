@@ -124,10 +124,16 @@ protected:
             // de audio a 44,1 kHz; ceder 0,5 ms deja el ritmo en ~11x tiempo real, que
             // es rapido para el test y sostenible para el drenador.
             //
+            // El piso es 1 ms, no 0,5: en Windows (winpthreads) un `sleep_for` de menos
+            // de 1 ms no cede NADA, y el helper alimentaba a la velocidad del render
+            // (-O0, ~1,2 ms por bloque): MEDIDO, 12/20 fallas aislado, y el primer
+            // snapshot salia en el bloque ~370 en vez del 4-5 (con >= 1 ms: 0/24).
+            // Es el mismo defecto de arriba por otra causa: el ritmo, no el afinador.
+            //
             // WAIT-OK: estimulo — es el RITMO de alimentacion, no una sincronizacion:
             //          imita que la captura llega en tiempo real. Acortarlo devuelve
             //          el defecto.
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         return false;
     }

@@ -52,4 +52,4 @@ target_compile_definitions(dsp_tests PRIVATE _USE_MATH_DEFINES)
 
 # Register with CTest
 include(GoogleTest)
-gtest_discover_tests(dsp_tests)
+wma_gtest_discover_tests(dsp_tests)

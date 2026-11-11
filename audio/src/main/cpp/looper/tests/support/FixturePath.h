@@ -29,6 +29,8 @@
 #include <string>
 #include <string_view>
 
+#include "tests/support/PathUtf8.h"
+
 #if defined(_WIN32)
 #include <process.h>
 #define WMA_TEST_GETPID _getpid
@@ -56,7 +58,8 @@ inline std::filesystem::path fixturePath(std::string_view name) {
 /** Borra al salir del alcance: /tmp no se limpia solo entre corridas. */
 class ScopedFixture {
 public:
-    explicit ScopedFixture(std::string_view name) : mPath(fixturePath(name)) {
+    explicit ScopedFixture(std::string_view name)
+        : mPath(fixturePath(name)), mUtf8(pathUtf8(mPath)) {
         std::error_code ec;
         std::filesystem::remove(mPath, ec);
     }
@@ -68,11 +71,12 @@ public:
     ScopedFixture& operator=(const ScopedFixture&) = delete;
 
     const std::filesystem::path& path() const { return mPath; }
-    std::string str() const { return mPath.string(); }
-    const char* c_str() const { return mPath.c_str(); }
+    std::string str() const { return mUtf8; }
+    const char* c_str() const { return mUtf8.c_str(); }
 
 private:
     std::filesystem::path mPath;
+    std::string mUtf8;
 };
 
 }  // namespace wma_test

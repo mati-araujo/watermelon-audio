@@ -801,7 +801,11 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEff
     // One state-version bump for the whole batch, not N — see AUD-6 in the
     // header. The C API used to loop over the individual setter here, so iOS
     // still had the bug this path exists to avoid.
-    return wma_effect_set_params_batch(g_wmaEngine, index, ids.get(), vals.get(),
+    std::vector<int> idsCopy;
+    if (!toIntVector(ids.get(), length, idsCopy)) {
+        return JniError::MEMORY_ALLOCATION_FAILED;  // los Scoped* sueltan lo pineado
+    }
+    return wma_effect_set_params_batch(g_wmaEngine, index, idsCopy.data(), vals.get(),
                                        static_cast<int>(length));
 }
 
@@ -833,8 +837,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMul
         return JniError::INVALID_OPERATION;
     }
 
-    jint result = wma_effect_set_params_multi(g_wmaEngine, indices.get(), params.get(),
-                                              vals.get(), static_cast<int>(length));
+    std::vector<int> indicesCopy;
+    std::vector<int> paramsCopy;
+    if (!toIntVector(indices.get(), length, indicesCopy) ||
+        !toIntVector(params.get(), length, paramsCopy)) {
+        return JniError::MEMORY_ALLOCATION_FAILED;  // los Scoped* sueltan lo pineado
+    }
+    jint result = wma_effect_set_params_multi(g_wmaEngine, indicesCopy.data(),
+                                              paramsCopy.data(), vals.get(),
+                                              static_cast<int>(length));
     if (result == JniError::SUCCESS && length > 0) {
         LOGI("nativeSetMultipleEffectParameters: applied %d updates", static_cast<int>(length));
     }
@@ -955,7 +966,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetFee
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAudioMode(
     JNIEnv* env, jobject thiz, jint mode) {
-    LOGI("AudioNativeBridge.setAudioMode: ENTER mode=%d", mode);
+    LOGI("AudioNativeBridge.setAudioMode: ENTER mode=%d", static_cast<int>(mode));
 
     if (!ensureEngine()) {
         LOGE("AudioNativeBridge.setAudioMode: engine not available");
@@ -2644,8 +2655,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArp
     if (!data) {
         return;
     }
-    wma_arp_set_scale_intervals(g_wmaEngine, data, env->GetArrayLength(intervals));
+    const jsize count = env->GetArrayLength(intervals);
+    std::vector<int> copy;
+    const bool copied = toIntVector(data, count, copy);
     env->ReleaseIntArrayElements(intervals, data, JNI_ABORT);
+    if (!copied) return;  // sin memoria: se conservan los intervalos actuales
+    wma_arp_set_scale_intervals(g_wmaEngine, copy.data(), count);
 }
 
 JNIEXPORT void JNICALL
@@ -3037,13 +3052,38 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     // Sizing the Java array to the ACTUAL count stays here too — same family as
     // the waveform clamp: what knows about Java array lengths lives up top.
     if (maxOnsets <= 0) return env->NewIntArray(0);
-    std::vector<jint> onsets(static_cast<size_t>(maxOnsets), 0);
-    static_assert(sizeof(jint) == sizeof(int), "onset buffer is reinterpreted as int*");
-    const int n = wma_looper_detect_onsets(g_wmaEngine, trackIndex,
-                                          reinterpret_cast<int*>(onsets.data()),
+    // std::bad_alloc no puede cruzar el JNIEXPORT: sin memoria, OutOfMemoryError pendiente (como deja un
+    // NewIntArray fallido) y null; el `external fun` devuelve IntArray no nulo, asi que sin excepcion el
+    // null entraria a Kotlin y el NPE apareceria lejos.
+    auto throwOom = [env]() -> jintArray {
+        if (!env->ExceptionCheck()) {
+            jclass oom = env->FindClass("java/lang/OutOfMemoryError");
+            if (oom != nullptr) {
+                env->ThrowNew(oom, "nativeLooperDetectOnsets: sin memoria para los onsets");
+                env->DeleteLocalRef(oom);
+            }
+        }
+        return nullptr;
+    };
+    std::vector<int> onsets;
+    try {
+        onsets.assign(static_cast<size_t>(maxOnsets), 0);
+    } catch (...) {
+        return throwOom();
+    }
+    const int n = wma_looper_detect_onsets(g_wmaEngine, trackIndex, onsets.data(),
                                           maxOnsets, hopFrames, sensitivity);
     jintArray result = env->NewIntArray(n);
-    if (result && n > 0) env->SetIntArrayRegion(result, 0, n, onsets.data());
+    if (result && n > 0) {
+        std::vector<jint> converted;
+        try {
+            converted.assign(onsets.begin(), onsets.begin() + n);
+        } catch (...) {
+            env->DeleteLocalRef(result);
+            return throwOom();
+        }
+        env->SetIntArrayRegion(result, 0, n, converted.data());
+    }
     return result;
 }
 
@@ -3063,8 +3103,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDetect
     }
     const jsize capacity = env->GetArrayLength(out);
     if (capacity <= 0) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
-    static_assert(sizeof(jint) == sizeof(int), "onset buffer is reinterpreted as int*");
-    std::vector<jint> onsets;
+    std::vector<int> onsets;
     try {
         onsets.assign(static_cast<size_t>(capacity), 0);
     } catch (...) {
@@ -3077,10 +3116,18 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDetect
         env->ExceptionClear();
         return static_cast<jint>(WMA_ERROR_MEMORY);
     }
-    const int n = wma_detect_onsets(samples, frames, sampleRate, reinterpret_cast<int*>(onsets.data()),
+    const int n = wma_detect_onsets(samples, frames, sampleRate, onsets.data(),
                                     capacity, hopFrames, sensitivity);
     env->ReleaseFloatArrayElements(stereo, samples, JNI_ABORT);
-    if (n > 0) env->SetIntArrayRegion(out, 0, n, onsets.data());
+    if (n > 0) {
+        std::vector<jint> converted;
+        try {
+            converted.assign(onsets.begin(), onsets.begin() + n);
+        } catch (...) {
+            return static_cast<jint>(WMA_ERROR_MEMORY);
+        }
+        env->SetIntArrayRegion(out, 0, n, converted.data());
+    }
     return static_cast<jint>(n);
 }
 
@@ -3094,7 +3141,6 @@ JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperAnalyzePitch(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat hopMs, jintArray outFrames,
     jfloatArray outHz, jfloatArray outConfidence, jintArray outHopFrames) {
-    static_assert(sizeof(jint) == sizeof(int), "frame buffer is reinterpreted as int*");
     int hopFrames = 0;
     jint written = 0;
     if (outFrames == nullptr || outHz == nullptr || outConfidence == nullptr) {
@@ -3111,9 +3157,17 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         const int maxPoints = std::min({static_cast<int>(frames.size()),
                                         static_cast<int>(hz.size()),
                                         static_cast<int>(confidence.size())});
+        std::vector<int> frameBuf;
+        try {
+            frameBuf.assign(static_cast<size_t>(std::max(maxPoints, 0)), 0);
+        } catch (...) {
+            return 0;  // los Scoped* sueltan lo pineado; 0 puntos, como un array invalido
+        }
         written = wma_looper_analyze_pitch(g_wmaEngine, trackIndex, hopMs,
-                                           reinterpret_cast<int*>(frames.get()), hz.get(),
+                                           frameBuf.data(), hz.get(),
                                            confidence.get(), maxPoints, &hopFrames);
+        const size_t copied = std::min(frameBuf.size(), static_cast<size_t>(std::max<jint>(written, 0)));
+        std::copy(frameBuf.begin(), frameBuf.begin() + copied, frames.get());
     }
     if (outHopFrames != nullptr) {
         ScopedIntArrayRW hop(env, outHopFrames);

@@ -23,11 +23,14 @@
  *     alguien con permiso de escritura en el directorio que reemplace el `.part` justo ahi pierde
  *     su archivo. Es la misma clase de ventana que el ultimo escalon del renombre, y del mismo dueno.
  *
- * POSIX, no `std::`: es el borde de E/S (el nucleo no lo ve). Compila para Android, iOS/macOS y
- * el host Linux del CI; nada de `android/` ni `jni.h` (regla de portabilidad del repo).
+ * Es el borde de E/S (el nucleo no lo ve) y no toca el SO: las primitivas (`open` en exclusiva, `lstat`,
+ * los escalones del renombre) viven en `platform/DumpFile.h`, con una rama POSIX (la de siempre) y una
+ * de Windows (REQ-061 AC-061.4: `CREATE_NEW | FILE_FLAG_OPEN_REPARSE_POINT` y `MoveFileExW` sin
+ * reemplazar). Nada de `android/` ni `jni.h` (regla de portabilidad del repo). Los paths son UTF-8.
  */
 
 #include "TunerInputDump.h"
+#include "../platform/DumpFile.h"
 
 #include <cstdio>
 #include <string>
@@ -42,17 +45,10 @@ enum class NoReplaceRenameStep {
     kCheckThenRename,  ///< lstat(to) y rename: el TOCTOU entre los dos se acepta (ver el .cpp)
 };
 
-/// Como termino un escalon del renombre.
-enum class RenameStepOutcome {
-    kDone,          ///< renombrado
-    kExists,        ///< el destino existe: no se toca nada, y no se baja de escalon
-    kUnsupported,   ///< el kernel o el sistema de archivos no lo soporta: se prueba el siguiente
-    kFailed,        ///< otro error (permiso, disco): no se insiste
-};
-
-/// La clasificacion de un errno de rename/link. Expuesta para que los tests fijen que un EINVAL
-/// (FUSE, sdcardfs) baja de escalon y no aborta el nombrado.
-RenameStepOutcome classifyRenameErrno(int err);
+/// Como termino un escalon del renombre, y la clasificacion de un errno de rename/link: viven en
+/// `platform/DumpFile.h`, junto a las primitivas de disco que los producen.
+using platform::RenameStepOutcome;
+using platform::classifyRenameErrno;
 
 /// Un escalon reemplazable: los tests inyectan el nativo y el de link para alcanzar el paso a los
 /// siguientes, que en el host nunca ocurre solo (ahi los dos se soportan). nullptr = el del sistema.
@@ -63,7 +59,7 @@ using RenameStepFn = RenameStepOutcome (*)(const std::string& from, const std::s
 /// kernel o el sistema de archivos. false si `to` existe o si algo fallo: `from` queda donde estaba.
 bool renameWithoutReplacing(const std::string& from, const std::string& to,
                             NoReplaceRenameStep firstStep = NoReplaceRenameStep::kNative,
-                            RenameStepFn native = nullptr, RenameStepFn link = nullptr);
+                            RenameStepFn nativeFn = nullptr, RenameStepFn linkFn = nullptr);
 
 class WavFileDumpSink final : public IDumpSink {
 public:
