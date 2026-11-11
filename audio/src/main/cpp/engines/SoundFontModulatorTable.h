@@ -247,8 +247,9 @@ inline bool classify(const Modulator& m, NoteOnModulator& out) {
     RejectionCounters scratch;
     if (rejectionSlotFor(m, scratch) != nullptr) return false;
     NoteSource primary, secondary;
-    classifyNoteSource(m.srcOper, primary);
-    classifyNoteSource(m.amtSrcOper, secondary);
+    if (!classifyNoteSource(m.srcOper, primary) || !classifyNoteSource(m.amtSrcOper, secondary)) {
+        return false;
+    }
     out.destOper = m.destOper;
     out.amount = static_cast<float>(m.amount);
     out.primarySource = primary;
