@@ -298,6 +298,11 @@ gate_guardrails() {
     say "guardrails (segundos, y fallan rapido)"
     step guardrails portability-self bash scripts/check-cpp-portability.sh --self-test || return 1
     step guardrails portability   bash scripts/check-cpp-portability.sh || return 1
+    # REQ-061 AC-061.1 — lo que no corre en Windows se declara. Su --self-test primero, como los demas; la parte
+    # estatica vigila los CMake de tests (incluido thirdparty/googletest.cmake) y las fuentes. El diff real de
+    # registro (nm) vive en windows-cross; los resultados, en run-cpp-tests.ps1.
+    step guardrails not-run-self  python3 scripts/check-windows-not-run.py --self-test || return 1
+    step guardrails not-run       python3 scripts/check-windows-not-run.py || return 1
     step guardrails no-ui         bash scripts/check-no-ui-in-library.sh || return 1
     # WD-1.1 — el --self-test va PRIMERO y no es ceremonia: si el parser se
     # rompe, el lint queda en verde permanente, que es el peor estado posible

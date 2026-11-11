@@ -58,6 +58,7 @@
         "ucrt64-gcc-c++-16.2.1-1.fc45",
         "ucrt64-crt-14.0.0-3.fc45",
         "ucrt64-winpthreads-static-14.0.0-3.fc45",
+        "gcc-c++-16.2.1-3.fc45",
         "java-25-openjdk-devel-1:25.0.4.1.1-1.1.fc45"
       ],
       "tools": ["cmake", "ninja-build", "python3", "git", "bash"]

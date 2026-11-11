@@ -37,20 +37,41 @@ camino critico de un PR atestado (`local_first.md` §2).
 - `check-windows-not-run.py` (REQ-061 AC-061.1): lo que NO corre en Windows se declara, no se esconde. El listado
   `tests/windows-not-run.txt` lleva `Suite.Test | razon` (test POSIX por naturaleza: `WMA_WINDOWS_NOT_RUN("razon")`,
   `tests/support/WindowsNotRun.h`) y las secciones `variante` (cuerpo con un `#if` de plataforma), `ambiente`
-  (prefijo exacto de un skip de ambiente), `solo-windows`, `deshabilitado` (TEST con prefijo `DISABLED_`) y las dos
-  de HALLAZGO `cmake | ruta | construccion | razon` (p. ej. `if(WIN32) => return()`: nunca el archivo entero) y
-  `fuera | ruta | condicion | razon` (todo `#if` de plataforma FUERA de los cuerpos de TEST, tests/support incluido, sin
-  numeros de linea; N apariciones = N entradas); TODA entrada con razon y con trinquete en las dos direcciones.
-  Estatico: ningun TEST/INSTANTIATE dentro de un `#if` sobre una macro de plataforma (`_WIN32`, `__APPLE__`,
-  `GTEST_OS_*`, `__FreeBSD__`...), ningun `#if` de plataforma en un cuerpo sin declarar, y en los CMake de tests
-  (parseados con parentesis balanceados, tambien un `if(` multilinea) ningun `return()`, `target`, `list(FILTER|
-  REMOVE_ITEM|REMOVE_AT)` o fuente de test bajo un if() de plataforma, ni `DISABLED`/`TEST_FILTER`, ni
-  `EXCLUDE_FROM_ALL` sobre algo que ctest registra (sobre una herramienta que ningun CMake registra no cuenta).
-  `--results DIR` (lo corre `run-cpp-tests.ps1` sobre el XML que cada test escribe en `gtest-xml/<target>/`, via
-  `wma_gtest_discover_tests`) exige que TODO skip este declarado. `run-cpp-tests.sh` corre la parte estatica antes de
-  compilar. 🔴 El inventario `fuera` obliga a DECLARAR cada `#if` de plataforma fuera de un cuerpo (una constante que
-  cambia el estimulo, p. ej. `kOverrunBlocksPerTick` en test_analysis_thread.cpp), pero no juzga si la razon es
+  (prefijo exacto de un skip de ambiente), `solo-windows`, `deshabilitado` (TEST con prefijo `DISABLED_`),
+  `posix-solo | target | Suite.Test | razon` (se compila en POSIX y no en Windows) y las dos de HALLAZGO
+  `cmake | ruta | construccion | razon` y `fuera | ruta | condicion | razon` (todo `#if` de plataforma FUERA de los cuerpos
+  de TEST, sin numeros de linea; N apariciones = N entradas); TODA entrada con razon y trinquete en las dos direcciones.
+  Son TRES partes y cada una ve una cosa distinta:
+  1. **Diff de registro** (`windows-cross/check.py`, abajo): la verdad. Que TESTS se compilan en cada lado, por `nm`.
+  2. **Estatica** (`python3 scripts/check-windows-not-run.py`, en `gate.sh`, CI y `run-cpp-tests.sh`, con su `--self-test`
+     antes): lo que (1) NO ve porque el TEST SI se registra pero queda vacio o filtrado. Fuentes: ningun TEST/INSTANTIATE
+     bajo un `#if` de plataforma/compilador (`_WIN32`, `__APPLE__`, `__GNUC__`, `__clang__`, `_POSIX_*`, `GTEST_OS_*`...),
+     ningun `#if` asi en un cuerpo sin declarar (`variante`) ni fuera de los cuerpos sin declarar (`fuera`). CMake (los
+     CMakeLists de tests Y los `.cmake` que incluyen, `thirdparty/googletest.cmake` incluido; parentesis balanceados):
+     bajo un `if()` de plataforma o de compilador (`WIN32`, `UNIX`, `APPLE`, `MINGW`, `MSVC`, `CMAKE_SYSTEM_*`,
+     `CMAKE_HOST_*`, `CMAKE_*_COMPILER*`, `ENV{MSYSTEM}`) todo `return()`, target, `list(FILTER|REMOVE_*)`, fuente de test,
+     definicion (`target_compile_definitions`, `add_definitions`, `-D`) o propiedad (`set_*_properties`, `TIMEOUT`); en
+     cualquier lado un genex con `PLATFORM_ID`/`*_COMPILER_ID`, un `${WIN32}`, y `DISABLED`/`TEST_FILTER`/`EXTRA_ARGS`/
+     `SKIP_REGULAR_EXPRESSION`/`WILL_FAIL`/`EXCLUDE_FROM_ALL` sobre algo que ctest registra. Cada hallazgo se declara
+     `cmake | ruta | clave | razon`. 🔴 Es una lista de construcciones: lo que se le escape lo caza (1) si saca el
+     TEST, y NADIE si lo deja registrado y lo vacia por una variable que el parser no sigue (`set(X ${Y})`).
+  3. **Resultados** (`--results DIR --build-dir BUILD`, lo corre `run-cpp-tests.ps1` en Windows): cada test que lista
+     cada exe de la suite (`<exe> --gtest_list_tests`; suites parametrizadas y typed incluidas) tiene su XML (sin XML = ctest
+     no lo corrio: `-E`, `TEST_FILTER`, `DISABLED`), ningun `<failure>` aunque ctest haya salido 0, todo skip declarado
+     (marcador contra el listado, ambiente por prefijo, sin mensaje = rojo). `--partial` (`-Filter`/`-Fast`) tolera los
+     registrados sin XML; un `<failure>` sigue rojo. Si Smart App Control no deja ejecutar un exe para listarlo, es ROJO.
+  🔴 El inventario `fuera` obliga a DECLARAR cada `#if` de plataforma fuera de un cuerpo, pero no juzga si la razon es
   cierta: que no cambie lo que el test afirma se revisa a mano.
+- `windows-cross/check.py` (REQ-061, `gate.sh --only windows-cross`; Mac con Homebrew o contenedor Fedora, `build-image.sh`):
+  (a) compila los OBJETOS de `desktop/` y de la suite de host para Windows (MinGW-w64, Debug, `-Werror`), baseline-trinquete
+  sobre FUENTES (`windows-cross/baseline.txt`); (b) compila la suite POSIX con el compilador NATIVO del host (Mac: el de
+  Xcode; contenedor: `gcc-c++`, pineado en `toolchain-pins.json`) en `build/windows-cross/<prefijo>/tests-posix`, y compara
+  con `nm` las clases `<Suite>_<Test>_Test::TestBody` que define cada target de test (TEST_P y plantillas de TYPED_TEST
+  incluidas, el espacio de nombres y los argumentos de plantilla se descartan): POSIX - Windows == `posix-solo` y
+  Windows - POSIX == `solo-windows`, por target. Un target que el host no construye es «no verificable en este host» (se
+  informa, en verde). 🔴 NO ve: un `INSTANTIATE_TEST_SUITE_P` que solo existe en un lado (la clase del TEST_P esta en los
+  dos; lo caza la estatica), ni nada que cambie sin cambiar la lista de clases (eso es el `--results` de Windows), ni
+  corre nada. En la Mac no se pudo medir desde la PC Windows: ahi el diff usa `nm` + `c++filt` de Xcode.
 - `check-jni-signatures.py` (REQ-025): la FIRMA del cruce JNI. 🔴 Su guarda de COMPLETITUD lo
   sostiene: si el parser abarca menos prototipos de los que hay en el arbol, FALLA. Sin baseline:
   nacio en cero desajustes. Las tres preguntas: `audio/src/main/cpp/jni/CLAUDE.md`.

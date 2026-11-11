@@ -171,10 +171,18 @@ Write-Host ("ctest wall time: {0:N0} s" -f $ctestWatch.Elapsed.TotalSeconds)
 $python = Find-First -OnPath 'python' -Candidates @()
 if (-not $python) { $python = Find-First -OnPath 'python3' -Candidates @() }
 if (-not $python) { throw "python not found: scripts/check-windows-not-run.py needs it (AC-061.1)." }
-$checkArgs = @((Join-Path $RepoRoot 'scripts\check-windows-not-run.py'), '--results', $ResultsDir)
+$checker = Join-Path $RepoRoot 'scripts\check-windows-not-run.py'
+# El --self-test PRIMERO (scripts/CLAUDE.md): si el parser del trinquete se rompe, queda en verde para siempre.
+& $python $checker --self-test
+$selfTestExit = $LASTEXITCODE
+# --build-dir: de ahi sale que exes registra la suite y que tests lista cada uno (`<exe> --gtest_list_tests`):
+# un test registrado sin XML (ctest -E, TEST_FILTER, DISABLED) es rojo. Si Smart App Control no deja listar un
+# exe, tambien es rojo: no se sabe que registra.
+$checkArgs = @($checker, '--results', $ResultsDir, '--build-dir', $BuildDir)
 if ($Filter -or $Fast) { $checkArgs += '--partial' }
 & $python @checkArgs
 $checkExit = $LASTEXITCODE
+if ($selfTestExit -ne 0) { $checkExit = $selfTestExit }
 
 if ($ctestExit -ne 0) { exit $ctestExit }
 exit $checkExit

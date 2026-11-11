@@ -24,6 +24,9 @@ forma, sin tipo, es `Suite.Test | razon`):
                                       misma condicion aparece N veces en el archivo, N entradas
   deshabilitado | Suite.Test | razon  un TEST con prefijo DISABLED_ (no corre en ninguna plataforma)
   solo-windows | Suite.Test o archivo.cpp | razon   test (o fuente) que existe SOLO en Windows
+  posix-solo | target | Suite.Test | razon   test que se compila/registra en POSIX y NO en Windows. Lo verifica el
+                                      DIFF DE REGISTRO de scripts/windows-cross/check.py (nm sobre los objetos de las dos
+                                      suites): esa es la mitad de AC-061.1 que esta lista estatica no puede ver
 
 REGLAS ESTATICAS (corren en cualquier SO)
   E1  el conjunto de tests que usan la macro == las entradas `Suite.Test | razon`.
@@ -37,7 +40,11 @@ REGLAS ESTATICAS (corren en cualquier SO)
   E2d INVENTARIO: todo `#if/#ifdef/#ifndef/#elif` con macro de plataforma FUERA de los cuerpos de TEST (en
       toda fuente de tests, incluida tests/support) esta declarado `fuera`, en las dos direcciones. Un
       `#define SKIPW() return` bajo `#ifdef _WIN32` esconde una falla sin tocar ningun TEST.
-  E3  ningun CMake de tests excluye fuentes ni targets de test (list(FILTER|REMOVE_ITEM|REMOVE_AT)), ni
+  E3  (tambien en los `.cmake` que los CMake de tests incluyen, thirdparty/googletest.cmake incluido; las condiciones son de
+      plataforma Y de compilador: WIN32, CMAKE_*_COMPILER_ID, ENV{MSYSTEM}...; un genex con PLATFORM_ID/COMPILER_ID o un
+      `${WIN32}` es hallazgo donde aparezca; bajo esas condiciones tambien lo es toda definicion -D y toda propiedad;
+      SKIP_REGULAR_EXPRESSION/WILL_FAIL/EXTRA_ARGS lo son siempre)
+      ningun CMake de tests excluye fuentes ni targets de test (list(FILTER|REMOVE_ITEM|REMOVE_AT)), ni
       corta la configuracion (`return()`), bajo un if() sobre WIN32/UNIX/APPLE/MINGW/MSVC/CMAKE_SYSTEM_NAME...
       (el if() se parsea con parentesis balanceados, tambien multilinea), ni usa DISABLED/TEST_FILTER/
       gtest_filter/EXCLUDE_FROM_ALL sobre algo que ctest registra, salvo el hallazgo declarado `cmake`
@@ -50,6 +57,9 @@ REGLAS DE RESULTADOS (`--results DIR`, sobre los XML de gtest de una corrida en 
   R2  TODO otro skip esta declarado como `ambiente` (el mensaje EMPIEZA con el prefijo). Un skip sin
       mensaje, o sin declarar, falla. Un prefijo declarado que no aparece en la corrida completa sobra
       (salvo `--partial`).
+
+  R3  (con --build-dir) cada test que registra cada exe (`<exe> --gtest_list_tests`) tiene su XML (--partial lo tolera), ninguno
+      trae `<failure>` aunque ctest haya salido 0, y un exe que el SO no deja ejecutar (Smart App Control) es ROJO.
 
 `--self-test` prueba cada regla en las dos direcciones. Corre antes que el lint.
 """
@@ -66,14 +76,16 @@ CPP = os.path.join(ROOT, 'audio', 'src', 'main', 'cpp')
 LISTADO = os.path.join(CPP, 'tests', 'windows-not-run.txt')
 MARCADOR = '[windows-not-run]'
 MACRO = 'WMA_WINDOWS_NOT_RUN'
-TIPOS = ('variante', 'ambiente', 'cmake', 'solo-windows', 'fuera', 'deshabilitado')
-HALLAZGOS = ('cmake', 'fuera')   # `tipo | ruta | clave | razon`: una entrada por hallazgo
+TIPOS = ('variante', 'ambiente', 'cmake', 'solo-windows', 'fuera', 'deshabilitado', 'posix-solo')
+HALLAZGOS = ('cmake', 'fuera', 'posix-solo')   # `tipo | ruta | clave | razon`: una entrada por hallazgo
+CLAVE_DE = {'cmake': 'construccion', 'fuera': 'condicion', 'posix-solo': 'Suite.Test'}
 
 PLATFORM = re.compile(
     r'\b(_WIN32|WIN32|__WIN32__|_WIN64|__MINGW32__|__MINGW64__|__MINGW__|_MSC_VER|__CYGWIN__|WINAPI_FAMILY\w*|'
     r'__APPLE__|__MACH__|TARGET_OS_\w+|GTEST_OS_\w+|'
     r'__linux__|__linux|linux|__gnu_linux__|__unix__|__unix|unix|__ANDROID__|__ANDROID_API__|'
-    r'__FreeBSD__|__NetBSD__|__OpenBSD__|__sun|__EMSCRIPTEN__|__QNX__|__has_include)\b')
+    r'__FreeBSD__|__NetBSD__|__OpenBSD__|__sun|__EMSCRIPTEN__|__QNX__|__has_include|'
+    r'__GNUC__|__GNUG__|__clang__|__clang_major__|_POSIX_VERSION|_POSIX_C_SOURCE|_POSIX_SOURCE|_XOPEN_SOURCE)\b')
 TEST_DECL = re.compile(r'^\s*(TEST|TEST_F|TEST_P|TYPED_TEST|TYPED_TEST_P)\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)', re.MULTILINE)
 INSTANTIATE = re.compile(
     r'^\s*(INSTANTIATE_TEST_SUITE_P|INSTANTIATE_TEST_CASE_P|INSTANTIATE_TYPED_TEST_SUITE_P)\s*\(\s*(\w+)\s*,\s*(\w+)',
@@ -197,7 +209,10 @@ def leer_listado(path):
             campos = [c.strip() for c in re.split(r' \| ', line, maxsplit=3)]
             if len(campos) != 4 or not all(campos):
                 lst.errores.append('%s:%d: se espera `%s | ruta | %s | razon` (todo con contenido): %r'
-                                   % (base, no, cabeza, 'construccion' if cabeza == 'cmake' else 'condicion', raw))
+                                   % (base, no, cabeza, CLAVE_DE[cabeza], raw))
+                continue
+            if cabeza == 'posix-solo' and not re.fullmatch(r'\w+\.\w+', campos[2]):
+                lst.errores.append('%s:%d: se espera `posix-solo | target | Suite.Test | razon`: %r' % (base, no, raw))
                 continue
             lst.hallazgos[cabeza][(campos[1], campos[2])] += 1
             continue
@@ -388,12 +403,26 @@ def analizar_fuentes(root, lst):
 
 # ------------------------------------------------------------------ CMake
 
-CM_PLATFORM = re.compile(r'\b(WIN32|UNIX|APPLE|MINGW|MSVC|CYGWIN|ANDROID|IOS|LINUX|EMSCRIPTEN|CMAKE_(HOST_)?SYSTEM\w*|'
-                         r'CMAKE_HOST_WIN32|CMAKE_HOST_UNIX|CMAKE_HOST_APPLE)\b')
+# Una condicion de plataforma O de compilador: lo que hace que un mismo CMake configure distinto en Windows y en POSIX.
+CM_PLATFORM = re.compile(r'\b(?:WIN32|UNIX|APPLE|MINGW|MSVC|MSYS|CYGWIN|ANDROID|IOS|LINUX|EMSCRIPTEN|CMAKE_(?:HOST_)?SYSTEM\w*|'
+                         r'CMAKE_HOST_\w+|CMAKE_(?:\w+_)?COMPILER\w*)\b'
+                         r'|\bENV\{(?:MSYSTEM\w*|MINGW\w*|OSTYPE|OS)\}')
+# La misma dependencia de plataforma escrita como valor (`${WIN32}`, `$ENV{MSYSTEM}`) o como expresion generadora
+# (`$<$<PLATFORM_ID:Windows>:test_x.cpp>`, `$<CXX_COMPILER_ID:GNU>`, `$<BOOL:${WIN32}>`): vale donde aparezca, no solo bajo un if().
+CM_PLAT_REF = re.compile(r'\$\{(?:WIN32|UNIX|APPLE|MINGW|MSVC|MSYS|CYGWIN|ANDROID|CMAKE_(?:HOST_)?SYSTEM\w*|CMAKE_HOST_\w+|'
+                         r'CMAKE_(?:\w+_)?COMPILER\w*)\}|\$ENV\{(?:MSYSTEM\w*|MINGW\w*|OSTYPE|OS)\}')
+CM_GENEX = re.compile(r'\$<.*?\b(?:PLATFORM_ID|\w*COMPILER_ID|\w*COMPILER_VERSION|\w*COMPILER_FRONTEND_VARIANT)\b')
+# Definiciones (-D / compile_definitions) y propiedades que cambian lo que un test hace o si se registra.
+CM_DEFINE = re.compile(r'(?<![\w-])[-/]D\s*[A-Za-z_]')
+CM_DEFINE_CMD = ('target_compile_definitions', 'add_compile_definitions', 'add_definitions')
+CM_PROP_CMD = ('set_tests_properties', 'set_target_properties', 'set_property', 'set_source_files_properties',
+               'set_directory_properties')
+CM_PROP_BAJO_PLATAFORMA = re.compile(r'\bTIMEOUT\b|\bCOMPILE_DEFINITIONS\b|\bCOMPILE_FLAGS\b')
 CM_SRC = re.compile(r'[\w./${}-]+\.(?:cpp|cc|c)\b')
 CM_TARGET = ('add_executable', 'add_test', 'gtest_discover_tests', 'wma_gtest_discover_tests', 'add_subdirectory')
 CM_LISTA = ('FILTER', 'REMOVE_ITEM', 'REMOVE_AT')
-CM_FILTRO = re.compile(r'\bDISABLED(_\w*)?\b|\bTEST_FILTER\b|gtest_filter|GTEST_FILTER', re.IGNORECASE)
+CM_FILTRO = re.compile(r'\bDISABLED(_\w*)?\b|\bTEST_FILTER\b|gtest_filter|GTEST_FILTER|\bSKIP_REGULAR_EXPRESSION\b|'
+                       r'\bSKIP_RETURN_CODE\b|\bWILL_FAIL\b|\bPASS_REGULAR_EXPRESSION\b|\bEXTRA_ARGS\b', re.IGNORECASE)
 CM_EXCLUDE = re.compile(r'\bEXCLUDE_FROM_ALL\b', re.IGNORECASE)
 CM_CMD = re.compile(r'([A-Za-z_]\w*)\s*\(')
 
@@ -456,6 +485,32 @@ def cm_cmake_files(root):
             yield dirpath, os.path.join(dirpath, 'CMakeLists.txt')
 
 
+def cm_archivos_de_test(root):
+    """[(dirpath, path)] de lo que decide como se configura un test: los CMakeLists de los directorios de tests Y
+    los `.cmake` que esos incluyen (`thirdparty/googletest.cmake` define como se registra TODO test; no se ignora
+    porque viva en thirdparty), hasta el punto fijo."""
+    base = [(d, p) for d, p in cm_cmake_files(root) if re.search(r'[/\\]tests?([/\\]|$)', d + os.sep)]
+    por_nombre = collections.defaultdict(list)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ('build', 'build-san', '.deps')]
+        for f in filenames:
+            if f.endswith('.cmake'):
+                por_nombre[f].append((dirpath, os.path.join(dirpath, f)))
+    vistos, cola = {p for _, p in base}, list(base)
+    while cola:
+        _, path = cola.pop()
+        for nombre, args, _ in cm_comandos(leer(path)):
+            if nombre != 'include':
+                continue
+            for m in re.finditer(r'([\w.-]+\.cmake)\b', args):
+                for dirpath, p in por_nombre.get(m.group(1), []):
+                    if p not in vistos:
+                        vistos.add(p)
+                        base.append((dirpath, p))
+                        cola.append((dirpath, p))
+    return sorted(base, key=lambda t: t[1])
+
+
 def cm_registrados(root):
     """(nombres de target que ctest registra, hay_registros_no_resolubles). Los de dentro de un function()/
     macro() son la definicion del helper, no un registro."""
@@ -506,9 +561,7 @@ def analizar_cmake(root, lst):
     solo = {n for n in lst['solo-windows'] if n.endswith(('.cpp', '.h'))}
     registrados, desconocido = cm_registrados(root)
     hallados, solo_usados = [], set()
-    for dirpath, path in cm_cmake_files(root):
-        if not re.search(r'[/\\]tests?([/\\]|$)', dirpath + os.sep):
-            continue
+    for dirpath, path in cm_archivos_de_test(root):
         rel = norm(os.path.relpath(path, root))
         pila = []     # [es_de_plataforma, rotulo de la rama vigente, condicion del if]
         for nombre, args, no in cm_comandos(leer(path)):
@@ -538,6 +591,9 @@ def analizar_cmake(root, lst):
                 objetivos = cm_objetivos_excluidos(nombre, args)
                 if objetivos is None or desconocido or any('$' in t or t in registrados for t in objetivos):
                     hallazgo('EXCLUDE_FROM_ALL sobre algo que ctest registra (o no se sabe cual): sus tests no se construyen')
+            if CM_GENEX.search(args) or CM_PLAT_REF.search(args):
+                hallazgo('expresion generadora o valor que depende de la plataforma/compilador (PLATFORM_ID, '
+                         'COMPILER_ID, ${WIN32}...): lo que cambia en Windows se declara')
             if rotulo:
                 _plataforma(nombre, args, hallazgo, dirpath, solo, solo_usados)
             if msgs:
@@ -549,6 +605,13 @@ def _plataforma(nombre, args, hallazgo, dirpath, solo, solo_usados):
     """Lo que no puede estar bajo un if() de plataforma en un CMake de tests."""
     if nombre == 'return':
         hallazgo('return() bajo una condicion de plataforma corta la configuracion de los tests')
+    if nombre in CM_DEFINE_CMD or CM_DEFINE.search(args):
+        hallazgo('una definicion (-D / compile_definitions) bajo una condicion de plataforma o compilador: puede '
+                 'apagar un TEST con un #if que no nombra ninguna plataforma')
+    if nombre in CM_PROP_CMD and (nombre == 'set_property' or re.search(r'\bPROPERTIES\b', args)):
+        hallazgo('una propiedad (%s) bajo una condicion de plataforma o compilador' % nombre)
+    elif CM_PROP_BAJO_PLATAFORMA.search(args):
+        hallazgo('TIMEOUT/COMPILE_DEFINITIONS bajo una condicion de plataforma o compilador')
     if nombre in CM_TARGET:
         hallazgo('un target de test (%s) bajo una condicion de plataforma' % nombre)
     if nombre == 'list' and args.split()[:1] and args.split()[0].upper() in CM_LISTA:
@@ -647,12 +710,125 @@ def resumen_por_ejecutable(directorio):
     return filas
 
 
-def chequeo_resultados(directorio, listado, parcial):
+def fallos_de_xml(directorio):
+    """{ 'Suite.Test': 'failure'|'error' } de todo testcase con un `<failure>` o `<error>`, sin mirar el exit code
+    de ctest: SKIP_REGULAR_EXPRESSION o WILL_FAIL lo dejan en 0 con la falla escrita en el XML."""
+    out = {}
+    for dirpath, _, filenames in os.walk(directorio):
+        for f in sorted(filenames):
+            if not f.endswith('.xml'):
+                continue
+            for tc in ET.parse(os.path.join(dirpath, f)).iter('testcase'):
+                if tc.get('status') is None:
+                    continue
+                for tag in ('failure', 'error'):
+                    if tc.find(tag) is not None:
+                        out['%s.%s' % (tc.get('classname'), tc.get('name'))] = tag
+    return out
+
+
+LISTA_SUITE = re.compile(r'^([\w/]+)\.(?:\s+#.*)?$')
+LISTA_TEST = re.compile(r'^\s+(\S+)(?:\s+#.*)?$')
+
+
+def parsear_lista(salida):
+    """Los nombres completos `Suite.Test` de un `--gtest_list_tests`: suites parametrizadas (`Inst/Suite.` y
+    `Test/3  # GetParam() = ...`) y typed (`Suite/0.  # TypeParam = int`) incluidas."""
+    nombres, suite = set(), None
+    for line in salida.splitlines():
+        if not line.strip():
+            continue
+        m = LISTA_SUITE.match(line.rstrip())
+        if m and not line.startswith(' '):
+            suite = m.group(1)
+            continue
+        m = LISTA_TEST.match(line)
+        if m and suite is not None and line.startswith(' '):
+            nombres.add('%s.%s' % (suite, m.group(1)))
+    return nombres
+
+
+def descubrir_ejecutables(build_dir):
+    """[(target, exe, cwd, filtro, args)] de los `<target>[1]_include.cmake` que escribe gtest_discover_tests: lo
+    que ctest va a ejecutar de verdad."""
+    out = []
+    for dirpath, _, filenames in os.walk(build_dir):
+        for f in sorted(filenames):
+            if not f.endswith('_include.cmake'):
+                continue
+            texto = leer(os.path.join(dirpath, f))
+
+            def campo(nombre):
+                m = re.search(r'\b%s\s+\[=*\[(.*?)\]=*\]' % nombre, texto, re.DOTALL)
+                return m.group(1) if m else ''
+            exe = campo('TEST_EXECUTABLE')
+            if exe:
+                out.append((os.path.basename(exe).rsplit('.exe', 1)[0], exe, campo('TEST_WORKING_DIR') or dirpath,
+                            campo('TEST_FILTER'), campo('TEST_EXTRA_ARGS')))
+    return sorted(out)
+
+
+def ejecutar_lista(exe, cwd):
+    """(stdout, error): `<exe> --gtest_list_tests`. Un exe que el SO no deja ejecutar (Smart App Control, una
+    directiva de aplicaciones) es un ERROR, nunca un verde: no se sabe que registra."""
+    import subprocess
+    try:
+        r = subprocess.run([exe, '--gtest_list_tests'], cwd=cwd, capture_output=True, text=True, timeout=300,
+                           encoding='utf-8', errors='replace')
+    except OSError as exc:
+        return '', ('no pude ejecutar `%s --gtest_list_tests` (%s): si es una directiva del SO (Smart App Control, '
+                    'AppLocker) el exe no se puede listar y no se puede decir que tests registra' % (exe, exc))
+    except subprocess.TimeoutExpired:
+        return '', '`%s --gtest_list_tests` no termino en 300 s' % exe
+    if r.returncode != 0:
+        return '', '`%s --gtest_list_tests` salio %d: %s' % (exe, r.returncode, (r.stderr or r.stdout).strip()[:300])
+    return r.stdout, None
+
+
+def registrados_de(build_dir, ejecutar=ejecutar_lista):
+    """({target: set(Suite.Test)}, errores): lo que cada exe de la suite registra segun `--gtest_list_tests`."""
+    regs, errores = {}, []
+    exes = descubrir_ejecutables(build_dir)
+    if not exes:
+        return regs, ['no hay ningun `*_include.cmake` de gtest_discover_tests en %s: no se sabe que exes tiene la suite' % build_dir]
+    for target, exe, cwd, filtro, args in exes:
+        if filtro.strip():
+            errores.append('%s: gtest_discover_tests con TEST_FILTER=%r: registra menos de lo que el exe tiene' % (target, filtro))
+        if args.strip():
+            errores.append('%s: gtest_discover_tests con EXTRA_ARGS=%r: cambia lo que cada test corre' % (target, args))
+        salida, err = ejecutar(exe, cwd)
+        if err:
+            errores.append('%s: %s' % (target, err))
+            continue
+        nombres = parsear_lista(salida)
+        if not nombres:
+            errores.append('%s: `--gtest_list_tests` no listo ningun test' % target)
+        regs[target] = nombres
+    return regs, errores
+
+
+def chequeo_resultados(directorio, listado, parcial, registrados=None):
+    """registrados: {target: set(Suite.Test)} de `registrados_de` (None = no se verifica el registro; solo los
+    tests unitarios del skip lo omiten). Cada test que un exe registra tiene su XML, salvo --partial."""
     lst = leer_listado(listado)
     errores, notas = list(lst.errores), []
     saltos, vistos, n_xml = saltos_de_xml(directorio)
     if n_xml == 0:
         return ['no hay XML de gtest en %s: la corrida no los genero' % directorio], notas
+    for nombre, tag in sorted(fallos_de_xml(directorio).items()):
+        errores.append('%s: <%s> en el XML (un test que falla no se acepta aunque ctest haya salido 0)' % (nombre, tag))
+    if registrados is not None:
+        deshab = set(lst['deshabilitado'])
+        for target in sorted(registrados):
+            if parcial:
+                continue
+            sin = sorted(n for n in registrados[target] - vistos
+                         if not any(n == d or n.startswith(d + '/') for d in deshab))
+            for n in sin[:25]:
+                errores.append('%s: %s esta registrado (--gtest_list_tests) y no tiene XML: ctest no lo corrio '
+                               '(TEST_FILTER, DISABLED, -E, un filtro...)' % (target, n))
+            if len(sin) > 25:
+                errores.append('%s: ... y %d registrados mas sin XML' % (target, len(sin) - 25))
     entradas = lst.no_run
     marcados = {n for n, m in saltos.items() if MARCADOR in m}
     for nombre in sorted(marcados - set(entradas)):
@@ -912,8 +1088,8 @@ def self_test():
                       listado=cm('set_tests_properties(S.A PROPERTIES DISABLED TRUE)')))
         caso('E3 una fuente de produccion bajo if(WIN32) -> verde', False,
              estatico('e3_prod', cmake='if(WIN32)\n  set(P ../PlatformWindows.cpp)\nendif()\nadd_executable(t test_a.cpp ${P})\n'))
-        caso('E3 un set() y un target_compile_definitions bajo if(WIN32) -> verde', False,
-             estatico('e3_defs', cmake='if(WIN32)\n  set(X 1)\n  target_compile_definitions(t PRIVATE A=1)\nendif()\n'))
+        caso('E3 un set() bajo if(WIN32) -> verde', False,
+             estatico('e3_defs', cmake='if(WIN32)\n  set(X 1)\nendif()\n'))
         caso('E3 un comentario con DISABLED -> verde', False,
              estatico('e3_comentario', cmake='# no DISABLED aca\nadd_executable(t test_a.cpp)\n'))
         caso('E3 un bloque de comentario #[[ ]] con return() bajo if(WIN32) -> verde', False,
@@ -952,6 +1128,135 @@ def self_test():
         caso('E3 el target registrado en OTRO CMake del arbol cuenta -> rojo', True,
              estatico('e3_efa_otro', cmake='add_executable(tool EXCLUDE_FROM_ALL tool.cpp)\n',
                       extra={'y/CMakeLists.txt': 'add_test(NAME tool COMMAND tool)\n'}))
+
+        # E3 — plataforma Y compilador, genex, definiciones, propiedades, y los .cmake que los tests incluyen
+        GTC = 'thirdparty/googletest.cmake'
+        INC = 'include(${CMAKE_CURRENT_LIST_DIR}/../thirdparty/googletest.cmake)\n'
+        caso('E3 genex $<$<NOT:$<PLATFORM_ID:Windows>>:test_x.cpp> -> rojo', True,
+             estatico('e3_genex', cmake='add_executable(t test_a.cpp $<$<NOT:$<PLATFORM_ID:Windows>>:test_x.cpp>)\n'))
+        caso('E3 genex $<$<CXX_COMPILER_ID:GNU>:test_x.cpp> -> rojo', True,
+             estatico('e3_genex_cc', cmake='target_sources(t PRIVATE $<$<CXX_COMPILER_ID:GNU>:test_x.cpp>)\n'))
+        caso('E3 genex $<BOOL:${WIN32}> -> rojo', True,
+             estatico('e3_genex_bool', cmake='target_sources(t PRIVATE $<$<BOOL:${WIN32}>:test_x.cpp>)\n'))
+        caso('E3 un valor ${MINGW} usado como variable -> rojo', True,
+             estatico('e3_ref', cmake='set(SKIP ${MINGW})\n'))
+        caso('E3 un genex que NO es de plataforma (TARGET_FILE) -> verde', False,
+             estatico('e3_genex_ok', cmake='add_custom_command(TARGET t COMMAND $<TARGET_FILE:t>)\n'))
+        caso('E3 if(WIN32) target_compile_definitions(WMA_SKIP_SONG=1) -> rojo', True,
+             estatico('e3_def', cmake='if(WIN32)\n  target_compile_definitions(core_tests PRIVATE WMA_SKIP_SONG=1)\nendif()\n'))
+        caso('E3 ... declarado -> verde', False,
+             estatico('e3_def_ok', cmake='if(WIN32)\n  target_compile_definitions(core_tests PRIVATE WMA_SKIP_SONG=1)\nendif()\n',
+                      listado=cm('if(WIN32) => target_compile_definitions(core_tests PRIVATE WMA_SKIP_SONG=1)')))
+        caso('E3 if(WIN32) add_definitions(-DWMA_SKIP=1) / add_compile_options(-DX) -> rojo', True,
+             estatico('e3_def2', cmake='if(WIN32)\n  add_compile_options(-DWMA_SKIP=1)\nendif()\n'))
+        caso('E3 add_compile_options(-Wall) bajo if(WIN32) (no es una definicion) -> verde', False,
+             estatico('e3_opt', cmake='if(WIN32)\n  add_compile_options(-Wall)\nendif()\n'))
+        caso('E3 una definicion fuera de toda condicion -> verde', False,
+             estatico('e3_def_plana', cmake='target_compile_definitions(t PRIVATE WMA_TEST_HOOKS=1)\n'))
+        caso('E3 definicion bajo if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU") -> rojo', True,
+             estatico('e3_def_cc', cmake='if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")\n  add_compile_definitions(X=1)\nendif()\n'))
+        caso('E3 definicion bajo if(CMAKE_C_COMPILER_ID ...) / CMAKE_HOST_WIN32 / ENV{MSYSTEM} -> rojo', True,
+             estatico('e3_def_c', cmake='if(CMAKE_C_COMPILER_ID MATCHES "Clang")\n  add_definitions(-DX)\nendif()\n'))
+        caso('E3 ... CMAKE_HOST_WIN32 -> rojo', True,
+             estatico('e3_def_host', cmake='if(CMAKE_HOST_WIN32)\n  add_compile_definitions(X=1)\nendif()\n'))
+        caso('E3 ... DEFINED ENV{MSYSTEM} -> rojo', True,
+             estatico('e3_def_env', cmake='if(DEFINED ENV{MSYSTEM})\n  add_compile_definitions(X=1)\nendif()\n'))
+        caso('E3 set_tests_properties SKIP_REGULAR_EXPRESSION bajo if(WIN32) -> rojo', True,
+             estatico('e3_skiprx', cmake='if(WIN32)\n  set_tests_properties(S.A PROPERTIES SKIP_REGULAR_EXPRESSION ".*")\nendif()\n'))
+        caso('E3 SKIP_REGULAR_EXPRESSION fuera de toda condicion -> rojo igual', True,
+             estatico('e3_skiprx_plano', cmake='set_tests_properties(S.A PROPERTIES SKIP_REGULAR_EXPRESSION ".*")\n'))
+        caso('E3 WILL_FAIL -> rojo', True, estatico('e3_willfail', cmake='set_tests_properties(S.A PROPERTIES WILL_FAIL TRUE)\n'))
+        caso('E3 TIMEOUT bajo if(WIN32) -> rojo; sin condicion -> verde', True,
+             estatico('e3_timeout', cmake='if(WIN32)\n  set_tests_properties(S.A PROPERTIES TIMEOUT 1)\nendif()\n'))
+        caso('E3 ... TIMEOUT sin condicion -> verde', False,
+             estatico('e3_timeout_plano', cmake='set_tests_properties(S.A PROPERTIES TIMEOUT 1)\n'))
+        caso('E3 EXTRA_ARGS / TEST_FILTER en un gtest_discover_tests -> rojo', True,
+             estatico('e3_extra', cmake='gtest_discover_tests(t EXTRA_ARGS --gtest_filter=-S.*)\n'))
+        caso('E3 un .cmake incluido por el CMake de tests: if(WIN32) TEST_FILTER -> rojo', True,
+             estatico('e3_gt_filter', cmake=INC,
+                      extra={GTC: 'function(w t)\n  if(WIN32)\n    gtest_discover_tests(${t} TEST_FILTER -S.*)\n  endif()\nendfunction()\n'}))
+        caso('E3 un .cmake incluido: add_compile_definitions bajo if(UNIX) -> rojo', True,
+             estatico('e3_gt_def', cmake=INC, extra={GTC: 'if(UNIX)\n  add_compile_definitions(WMA_SKIP=1)\nendif()\n'}))
+        caso('E3 un .cmake incluido sin nada de plataforma -> verde', False,
+             estatico('e3_gt_ok', cmake=INC, extra={GTC: 'function(w t)\n  gtest_discover_tests(${t} XML_OUTPUT_DIR x)\nendfunction()\n'}))
+        caso('E3 un .cmake que NINGUN test incluye (produccion) con if(WIN32) -> verde', False,
+             estatico('e3_prod_cmake', extra={'thirdparty/otra.cmake': 'if(WIN32)\n  add_compile_definitions(X=1)\nendif()\n'}))
+        caso('E3 el .cmake incluido por otro .cmake incluido cuenta -> rojo', True,
+             estatico('e3_gt_anidado', cmake=INC,
+                      extra={GTC: 'include(${CMAKE_CURRENT_LIST_DIR}/hijo.cmake)\n',
+                             'thirdparty/hijo.cmake': 'if(MSVC)\n  add_definitions(-DX)\nendif()\n'}))
+
+        # fuentes: guardas de compilador / POSIX
+        for macro, cond in (('__GNUC__', '#ifdef __GNUC__'), ('__clang__', '#if defined(__clang__)'),
+                            ('_POSIX_VERSION', '#if defined(_POSIX_VERSION)'), ('_POSIX_C_SOURCE', '#if _POSIX_C_SOURCE >= 200809L'),
+                            ('__unix', '#ifdef __unix')):
+            caso('E2a TEST bajo %s -> rojo' % macro, True,
+                 estatico('e2a_cc_' + macro, fuente=TEST_OK + cond + '\nTEST(Zz, Y) {}\n#endif\n'))
+            caso('E2d %s fuera de un cuerpo, sin declarar -> rojo' % macro, True,
+                 estatico('e2d_cc_' + macro, fuente=TEST_OK + cond + '\nint a;\n#endif\n'))
+        caso('E2b #ifdef __GNUC__ en el cuerpo de un test sin declarar -> rojo', True,
+             estatico('e2b_gnuc', fuente=TEST_OK + 'TEST(S, B) {\n#ifdef __GNUC__\n    GTEST_SKIP();\n#endif\n}\n'))
+
+        # R — lo que cada exe registra contra los XML, y los <failure>
+        def reg_xml(nombre, casos, registrados, listado='S.A | r\n', parcial=False):
+            base = os.path.join(tmp, nombre)
+            cuerpo = ''.join('<testcase name="%s" status="run" classname="%s">%s</testcase>' % (
+                c[1], c[0], '<failure message="boom"/>' if len(c) > 2 and c[2] == 'failure' else
+                ('<skipped message="%s"/>' % c[2] if len(c) > 2 else '')) for c in casos)
+            _w(base, 'x.xml', '<testsuites><testsuite name="x">%s</testsuite></testsuites>' % cuerpo)
+            return chequeo_resultados(base, _w(base, 'l.txt', listado), parcial, registrados)[0]
+
+        MARC = MARCADOR + ' razon'
+        caso('R3 todo lo registrado tiene XML -> verde', False,
+             reg_xml('r3_ok', [('S', 'A', MARC), ('S', 'B')], {'t': {'S.A', 'S.B'}}))
+        caso('R3 un registrado SIN XML (TEST_FILTER, DISABLED, -E) -> rojo', True,
+             reg_xml('r3_sinxml', [('S', 'A', MARC)], {'t': {'S.A', 'S.B'}}))
+        caso('R3 ... con --partial explicito se tolera -> verde', False,
+             reg_xml('r3_parcial', [('S', 'A', MARC)], {'t': {'S.A', 'S.B'}}, parcial=True))
+        caso('R3 un registrado declarado `deshabilitado` sin XML -> verde', False,
+             reg_xml('r3_deshab', [('S', 'A', MARC)], {'t': {'S.A', 'S.DISABLED_B'}},
+                     listado='S.A | r\ndeshabilitado | S.DISABLED_B | no corre\n'))
+        caso('R3 un <failure> en el XML (ctest pudo salir 0) -> rojo', True,
+             reg_xml('r3_failure', [('S', 'A', MARC), ('S', 'B', 'failure')], {'t': {'S.A', 'S.B'}}))
+        caso('R3 ... el <failure> sigue rojo con --partial', True,
+             reg_xml('r3_failure_p', [('S', 'A', MARC), ('S', 'B', 'failure')], {'t': {'S.A', 'S.B'}}, parcial=True))
+        caso('R3 un test parametrizado y uno typed con su XML -> verde', False,
+             reg_xml('r3_param', [('S', 'A', MARC), ('Inst/P', 'T/0'), ('Ty/1', 'U')],
+                     {'t': {'S.A', 'Inst/P.T/0', 'Ty/1.U'}}))
+        caso('R3 ... y el typed sin XML -> rojo', True,
+             reg_xml('r3_param_no', [('S', 'A', MARC), ('Inst/P', 'T/0')],
+                     {'t': {'S.A', 'Inst/P.T/0', 'Ty/1.U'}}))
+        eq_lista = parsear_lista(
+            'Running main() from gtest_main.cc\nS.\n  A\n  B\nInst/P.\n  T/0  # GetParam() = 1\n  T/1  # GetParam() = 2\n'
+            'Ty/0.  # TypeParam = int\n  U\nTy/1.  # TypeParam = float\n  U\n')
+        caso('R3 el parser de --gtest_list_tests: suites, parametrizadas y typed', False,
+             [] if eq_lista == {'S.A', 'S.B', 'Inst/P.T/0', 'Inst/P.T/1', 'Ty/0.U', 'Ty/1.U'} else [repr(sorted(eq_lista))])
+
+        def lista_con(nombre, salidas, include_extra=''):
+            base = os.path.join(tmp, nombre)
+            for t, out in salidas.items():
+                exe = os.path.join(base, t, t + '.exe')
+                _w(base, '%s/%s[1]_include.cmake' % (t, t),
+                   'gtest_discover_tests_impl(\n  TEST_EXECUTABLE [==[%s]==]\n  TEST_WORKING_DIR [==[%s]==]\n'
+                   '  TEST_EXTRA_ARGS [==[]==]\n  TEST_FILTER [==[%s]==]\n)\n' % (exe.replace(os.sep, '/'), os.path.dirname(exe).replace(os.sep, '/'), include_extra))
+            return base
+
+        def ejecutor(salidas):
+            def f(exe, cwd):
+                s = salidas[os.path.basename(exe)[:-4]]
+                return (None, s[1]) if isinstance(s, tuple) else (s, None)
+            return f
+        b = lista_con('lista_ok', {'t': ''})
+        regs, errs = registrados_de(b, ejecutor({'t': 'S.\n  A\n'}))
+        caso('R3 registrados_de: un exe que lista -> verde', False, errs + ([] if regs == {'t': {'S.A'}} else ['no listo S.A']))
+        regs, errs = registrados_de(b, ejecutor({'t': ('', 'no pude ejecutar t.exe (WinError 4551): Smart App Control')}))
+        caso('R3 un exe que el SO no deja listar (Smart App Control) -> rojo con el mensaje', True,
+             errs if errs and 'Smart App Control' in errs[0] else [])
+        b = lista_con('lista_filtro', {'t': ''}, include_extra='-S.*')
+        regs, errs = registrados_de(b, ejecutor({'t': 'S.\n  A\n'}))
+        caso('R3 gtest_discover_tests con TEST_FILTER no vacio -> rojo', True, errs)
+        base = os.path.join(tmp, 'lista_vacia'); os.makedirs(base)
+        caso('R3 un build sin ningun *_include.cmake -> rojo', True, registrados_de(base, ejecutor({}))[1])
 
         # R1 / R2
         def resultados(nombre, casos, listado='S.A | r\n', parcial=False):
@@ -996,7 +1301,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--results', metavar='DIR', help='directorio con los XML de gtest de una corrida en Windows')
-    ap.add_argument('--partial', action='store_true', help='la corrida fue filtrada: tolera los del listado ausentes')
+    ap.add_argument('--build-dir', metavar='DIR', help='el build de la suite (con los *_include.cmake de gtest): de ahi sale '
+                    'que exes hay y que tests registra cada uno; obligatorio con --results')
+    ap.add_argument('--partial', action='store_true', help='la corrida fue filtrada a proposito (-Filter/-Fast): tolera '
+                    'los del listado ausentes y los registrados sin XML')
     args = ap.parse_args()
 
     if args.self_test:
@@ -1008,8 +1316,15 @@ def main():
     errores = chequeo_estatico(CPP, LISTADO)
     notas = []
     if args.results:
-        e, notas = chequeo_resultados(args.results, LISTADO, args.partial)
+        if not args.build_dir:
+            print('check-windows-not-run: --results necesita --build-dir (sin el no se sabe que tests registra cada exe)',
+                  file=sys.stderr)
+            return 2
+        regs, e_reg = registrados_de(args.build_dir)
+        errores += e_reg
+        e, notas = chequeo_resultados(args.results, LISTADO, args.partial, regs)
         errores += [x for x in e if x not in errores]
+        notas.append('registrados: ' + ', '.join('%s=%d' % (t, len(regs[t])) for t in sorted(regs)))
         filas = resumen_por_ejecutable(args.results)
         print('  %-28s %7s %6s %6s' % ('ejecutable', 'pass', 'fail', 'skip'))
         for exe in sorted(filas):

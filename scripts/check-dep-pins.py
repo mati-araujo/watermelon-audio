@@ -533,6 +533,8 @@ def check_windows_cross(root, files, findings):
             (msys["package_version"].startswith(msys["gcc"] + "-"), "msys2_ucrt64.package_version no es de msys2_ucrt64.gcc"),
             (any(p.startswith("ucrt64-gcc-c++-" + cont["gcc"] + "-") for p in cont["packages"]),
              "container.packages no trae ucrt64-gcc-c++ de la version container.gcc"),
+            (any(p.startswith("gcc-c++-" + cont["gcc"] + "-") for p in cont["packages"]),
+             "container.packages no trae el gcc-c++ NATIVO de la version container.gcc (windows-cross compila la suite POSIX con el)"),
         ]
     except (KeyError, TypeError, AttributeError) as exc:
         findings.append(("leer", f"{PINS} no tiene la forma del cruce a Windows ({exc!r}): no pude medir el pin"))
@@ -604,7 +606,7 @@ CLEAN = {
             "msys2_ucrt64": {"package_version": "16.2.0-4", "gcc": "16.2.0"},
             "container": {"prefix": "x86_64-w64-mingw32ucrt-", "gcc": "16.2.1",
                           "base_image": "fedora@sha256:" + "c" * 64,
-                          "packages": ["ucrt64-gcc-c++-16.2.1-1.fc45", "ucrt64-crt-14.0.0-3.fc45"]},
+                          "packages": ["ucrt64-gcc-c++-16.2.1-1.fc45", "ucrt64-crt-14.0.0-3.fc45", "gcc-c++-16.2.1-3.fc45"]},
         }}),
     "scripts/windows-cross/Dockerfile": "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nARG PACKAGES\n",
     "scripts/windows-cross/build-image.sh": "docker build --build-arg \"BASE_IMAGE=$BASE\" .\n",
@@ -888,6 +890,8 @@ CASES = [
     ("el GCC del contenedor no es el del paquete", mutate(PINS, '"gcc": "16.2.1"', '"gcc": "16.2.9"'), "windows-cross"),
     ("un paquete del contenedor sin version", mutate(
         PINS, '"ucrt64-crt-14.0.0-3.fc45"', '"ucrt64-crt"'), "windows-cross"),
+    ("el contenedor sin el gcc-c++ nativo", mutate(
+        PINS, ', "gcc-c++-16.2.1-3.fc45"', ''), "windows-cross"),
     ("toolchain-pins sin el cruce a Windows", mutate(PINS, '"_windows_cross"', '"_otra_cosa"'), "leer"),
     ("uses por tag en una composite action local", add(
         ".github/actions/setup/action.yml",

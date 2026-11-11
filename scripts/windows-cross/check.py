@@ -28,6 +28,7 @@
 # Build dir persistente (incremental): build/windows-cross/<prefijo>/ (`/build`
 # esta en .gitignore). WMA_CROSS_BUILD_DIR lo cambia.
 # ============================================================================
+import collections
 import glob
 import json
 import os
@@ -208,17 +209,22 @@ def rel_source(path, directory):
     return p.replace(os.sep, "/")
 
 
-def build_objects(name, src_dir, build_dir, prefix, java_home, jobs, runner=run):
-    """Configura, y compila SOLO los objetos con `ninja -k 0`. Devuelve
-    (todas las fuentes, fuentes que fallaron, log)."""
+def build_objects(name, src_dir, build_dir, prefix, java_home, jobs, runner=run, native=False, gtest_src=None,
+                  only=None):
+    """Configura, y compila SOLO los objetos con `ninja -k 0`. Devuelve (todas las fuentes, fuentes que
+    fallaron, log, detalle, {objeto: fuente}). `native`: el compilador del host, sin toolchain de cruce (la suite
+    POSIX del diff de registro); `gtest_src`: googletest ya bajado (no se baja dos veces); `only(objeto)`: compilar
+    solo esos objetos."""
     os.makedirs(build_dir, exist_ok=True)
-    cfg = ["cmake", "-S", src_dir, "-B", build_dir, "-G", "Ninja",
-           f"-DCMAKE_BUILD_TYPE={BUILD_TYPE}",
-           f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}"]
+    cfg = ["cmake", "-S", src_dir, "-B", build_dir, "-G", "Ninja", f"-DCMAKE_BUILD_TYPE={BUILD_TYPE}"]
+    if not native:
+        cfg.append(f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}")
     if name == "desktop":
         cfg += [f"-DWMA_JAVA_HOME={java_home}", "-DWMA_DESKTOP_WERROR=ON"]
     else:
         cfg += ["-DWMA_TESTS_WERROR=ON", f"-DFETCHCONTENT_BASE_DIR={os.path.join(build_dir, '.deps')}"]
+        if gtest_src:
+            cfg.append(f"-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST={gtest_src}")
     cfg_log = os.path.join(build_dir, "configure.log")
     r = runner(cfg, cfg_log)
     if r.returncode != 0:
@@ -235,7 +241,8 @@ def build_objects(name, src_dir, build_dir, prefix, java_home, jobs, runner=run)
             continue
         if not e.get("output"):
             raise Fatal(f"[{name}] compdb sin 'output' para {e.get('file')}: ninja demasiado viejo")
-        by_output[e["output"]] = rel_source(e["file"], e["directory"])
+        if only is None or only(e["output"]):
+            by_output[e["output"]] = rel_source(e["file"], e["directory"])
     if not by_output:
         raise Fatal(f"[{name}] el CMake no declara ningun objeto: no pude medir nada")
 
@@ -253,7 +260,7 @@ def build_objects(name, src_dir, build_dir, prefix, java_home, jobs, runner=run)
             raise Fatal(f"[{name}] ninja fallo en {o!r}, que no es un objeto de la compdb (log: {log})")
         failed.add(src)
         detail[src] = blocks.get(o, "")
-    return set(by_output.values()), failed, log, detail
+    return set(by_output.values()), failed, log, detail, by_output
 
 
 def error_lines(text, limit=6):
@@ -285,16 +292,22 @@ def main(argv):
     java_home = make_java_home(build_root)
     jobs = os.cpu_count() or 4
     print(f"windows-cross: {gxx} (GCC {got}), {BUILD_TYPE}, -Werror, build en {build_root}", flush=True)
-    return gate(argv, build_root, prefix, java_home, jobs)
+    return gate(argv, build_root, prefix, java_home, jobs,
+                registro=lambda win_dir, win_by_out: registro_gate(build_root, prefix, win_dir, win_by_out, jobs))
 
 
-def gate(argv, build_root, prefix, java_home, jobs, runner=run, baseline_path=BASELINE):
-    """Compila los dos CMakes y da el veredicto contra el baseline: el exit code."""
+def gate(argv, build_root, prefix, java_home, jobs, runner=run, baseline_path=BASELINE, registro=None):
+    """Compila los dos CMakes y da el veredicto contra el baseline: el exit code. `registro(win_dir, win_by_out)`:
+    el diff de registro de AC-061.1 (`registro_gate`), que corre si la suite de Windows compila entera."""
     update = "--update-baseline" in argv
     known, failed, outputs = set(), set(), {}
+    win_tests, tests_fallan = None, False
     for name, src in (("desktop", os.path.join(CPP, "desktop")), ("tests", os.path.join(CPP, "tests"))):
-        srcs, fl, log, detail = build_objects(name, src, os.path.join(build_root, name), prefix, java_home, jobs, runner)
+        srcs, fl, log, detail, by_out = build_objects(name, src, os.path.join(build_root, name), prefix, java_home,
+                                                      jobs, runner)
         print(f"  {name}: {len(srcs)} objetos, {len(fl)} fallan", flush=True)
+        if name == "tests":
+            win_tests, tests_fallan = (os.path.join(build_root, name), by_out), bool(fl)
         known |= srcs
         failed |= fl
         for src_file, text in detail.items():
@@ -314,10 +327,18 @@ def gate(argv, build_root, prefix, java_home, jobs, runner=run, baseline_path=BA
         raise Fatal(f"no pude leer el baseline: {exc}")
     nuevas, sobrantes = verdict(failed, baseline, known)
 
+    rc_reg = 0
+    if registro is not None and not tests_fallan:
+        rc_reg = registro(*win_tests)
+    elif registro is not None:
+        print("  diff de registro: SALTEADO (la suite de Windows no compila entera: no hay objetos que comparar)")
+    if not nuevas and not sobrantes and rc_reg:
+        print("windows-cross: ROJO — el baseline de fuentes esta bien, pero el diff de registro (arriba) no")
+        return rc_reg
     if not nuevas and not sobrantes:
         print(f"windows-cross: OK — {len(failed)} fuentes fallan, todas en el baseline"
               if baseline else "windows-cross: OK — baseline vacio, cero fallas")
-        return 0
+        return rc_reg
     if nuevas:
         print(f"\nROJO — {len(nuevas)} fuente(s) NO compilan para Windows y no estan en el baseline:")
         for s in nuevas:
@@ -332,6 +353,268 @@ def gate(argv, build_root, prefix, java_home, jobs, runner=run, baseline_path=BA
         for s in sobrantes:
             print(f"  {s}" + ("" if s in known else "   (no es fuente de ningun CMake)"))
     return 1
+
+
+# --- diff de registro (AC-061.1) ----------------------------------------------
+#
+# Que tests REGISTRA la suite en Windows contra POSIX, sin ejecutar nada: cada TEST/TEST_F/TEST_P/TYPED_TEST
+# define una clase `<Suite>_<Test>_Test` con `TestBody()`; esa clase esta en el objeto o no esta, sea cual sea
+# la construccion que la saque (un #if, una guarda de compilador, un genex, una definicion de CMake, un target
+# que no se configura). Se compila la suite DOS veces (Windows con el cruce, POSIX con el compilador del host,
+# mismo Debug y -Werror), se lee con `nm` que clases define cada target de test y se compara por target:
+#
+#   POSIX - Windows == lo declarado `posix-solo | target | Suite.Test  | razon`
+#   Windows - POSIX == lo declarado `solo-windows | Suite.Test o archivo.cpp | razon`
+#
+# en las dos direcciones. Lo declarado de un target que el host POSIX no construyo (p. ej. sin libusb) es "no
+# verificable en este host": se informa, no se da por bueno ni por malo. Los WMA_WINDOWS_NOT_RUN estan
+# registrados en los dos lados (no entran): los cubre `check-windows-not-run.py --results`.
+
+NM_LINE = re.compile(r"^[0-9a-fA-F]+\s+[A-Za-z]\s+(\S+)")
+TESTBODY_RE = re.compile(r"(?<![\w])(\w+_Test)(?:<.*>)?::TestBody\(\)")
+OBJ_TARGET_RE = re.compile(r"CMakeFiles/([^/]+)\.dir/")
+
+
+def clase_de(nombre):
+    """`Suite.Test` -> la clase que gtest genera. (`Suite_Test_Test` es ambiguo al reves: por eso se compara por
+    clase y se muestra con el nombre que sale de las fuentes.)"""
+    suite, _, test = nombre.partition(".")
+    return f"{suite}_{test}_Test"
+
+
+def simbolos_testbody(nm_out):
+    """Los simbolos (mangled) DEFINIDOS que mencionan TestBody en la salida de `nm` (un indefinido no trae direccion)."""
+    out = set()
+    for line in nm_out.splitlines():
+        if "TestBody" not in line:
+            continue
+        m = NM_LINE.match(line.strip())
+        if m:
+            out.add(m.group(1))
+    return out
+
+
+def clases_de_demangled(lines):
+    return {m.group(1) for l in lines for m in [TESTBODY_RE.search(l)] if m}
+
+
+def targets_de_test(build_dir):
+    """Los targets que registran tests con gtest_discover_tests: lo dicen los `<target>[1]_include.cmake`."""
+    out = set()
+    for _, _, files in os.walk(build_dir):
+        for f in files:
+            m = re.fullmatch(r"(.+)\[1\]_include\.cmake", f)
+            if m:
+                out.add(m.group(1))
+    return out
+
+
+def objetos_por_target(by_output, targets):
+    """{target: [(salida de ninja, fuente)]}"""
+    out = {t: [] for t in targets}
+    for o, src in by_output.items():
+        m = OBJ_TARGET_RE.search(o.replace("\\", "/"))
+        if m and m.group(1) in out:
+            out[m.group(1)].append((o, src))
+    return out
+
+
+def find_tool(names):
+    for n in names:
+        p = shutil.which(n)
+        if p:
+            return p
+    raise Fatal(f"no encuentro {' ni '.join(names)} en el PATH (binutils): el diff de registro lee los objetos con nm")
+
+
+def demangle(filt, symbols):
+    r = subprocess.run([filt], input="\n".join(symbols) + "\n", capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    lines = r.stdout.splitlines()
+    if r.returncode != 0 or len(lines) != len(symbols):
+        raise Fatal(f"c++filt dio {len(lines)} lineas para {len(symbols)} simbolos (rc={r.returncode})")
+    return lines
+
+
+def clases_por_target(build_dir, by_output, targets, nm, filt, runner=run, demangler=demangle):
+    """{target: {clase: {basename de la fuente}}} de los objetos de cada target de test."""
+    trabajo = [(t, o, os.path.basename(src), o if os.path.isabs(o) else os.path.join(build_dir, o))
+               for t, objs in objetos_por_target(by_output, targets).items() for o, src in objs]
+
+    def leer_obj(item):
+        r = runner([nm, item[3]])
+        if r.returncode != 0:
+            raise Fatal(f"`nm {item[3]}` salio {r.returncode}: {r.stdout[-300:]}")
+        return simbolos_testbody(r.stdout)
+
+    # nm por objeto es E/S (Debug, build dir montado): en paralelo
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4) * 2)) as pool:
+        por_obj = {(t, o, base): syms for (t, o, base, _), syms in zip(trabajo, pool.map(leer_obj, trabajo))}
+    todos = sorted(set().union(*por_obj.values())) if por_obj else []
+    dem = dict(zip(todos, demangler(filt, todos))) if todos else {}
+    out = {t: {} for t in targets}
+    for (t, _, base), syms in por_obj.items():
+        for c in clases_de_demangled(dem[s] for s in syms):
+            out[t].setdefault(c, set()).add(base)
+    return out
+
+
+def diff_registro(posix, win, decl_posix, decl_solo, nombres=None):
+    """Veredicto puro. posix/win: {target: {clase: {fuentes}}} (un target ausente en el dict = ese lado no lo
+    construyo). decl_posix: Counter {(target, 'Suite.Test' o '*'): n}. decl_solo: {nombre: razon} (`Suite.Test`
+    o `archivo.cpp`). Devuelve (errores, notas, resumen)."""
+    nombres = nombres or {}
+    legible = lambda c: nombres.get(c, c)
+    errores, notas, resumen = [], [], []
+    dp = collections.defaultdict(set)
+    for (t, n), _ in decl_posix.items():
+        dp[t].add(n)
+    solo_clases = {clase_de(n) for n in decl_solo if not n.endswith((".cpp", ".h"))}
+    solo_archivos = {n for n in decl_solo if n.endswith((".cpp", ".h"))}
+    usados_clase, usados_archivo = set(), set()
+    no_verif_win = set()
+
+    for t in sorted(set(posix) | set(win) | set(dp)):
+        P, W = posix.get(t), win.get(t)
+        if P is None and W is None:
+            notas.append(f"{t}: NO VERIFICABLE en este host (ni se construye en el host POSIX ni se configura en Windows): "
+                         f"{len(dp[t])} entrada(s) `posix-solo` declarada(s) sin comprobar")
+            continue
+        if P is None:
+            notas.append(f"{t}: NO VERIFICABLE en este host: Windows lo compila ({len(W)} clases) y el host POSIX no lo "
+                         f"construyo; su lado `solo-windows` y su diff no se comparan aca")
+            no_verif_win |= set(W)
+            for c, srcs in W.items():
+                usados_archivo |= srcs & solo_archivos
+            resumen.append(f"{t}: posix=- windows={len(W)}")
+            continue
+        W = W or {}
+        resumen.append(f"{t}: posix={len(P)} windows={len(W)}" + ("" if t in win else " (no se configura en Windows)"))
+        # POSIX - Windows
+        faltan = set(P) - set(W)
+        declarado = {clase_de(n) for n in dp.get(t, set())}
+        for c in sorted(faltan - declarado):
+            errores.append(f"{t}: {legible(c)} se compila/registra en POSIX y NO en Windows y no esta declarado "
+                           f"(`posix-solo | {t} | {legible(c)} | razon`)")
+        for c in sorted(declarado - faltan):
+            errores.append(f"{t}: declarado `posix-solo` {legible(c)} pero " +
+                           ("no existe en POSIX (sobra la entrada)" if c not in P else "Windows tambien lo compila (sobra la entrada)"))
+        # Windows - POSIX
+        extra = set(W) - set(P)
+        for c in sorted(extra):
+            srcs = W[c]
+            if c in solo_clases:
+                usados_clase.add(c)
+            elif srcs & solo_archivos:
+                usados_archivo |= srcs & solo_archivos
+            else:
+                errores.append(f"{t}: {legible(c)} se compila/registra SOLO en Windows y no esta declarado "
+                               f"(`solo-windows | {legible(c)} | razon`)")
+    # una entrada solo-windows que no se vio en ningun diff verificable sobra
+    clases_no_verif = no_verif_win
+    for n in sorted(decl_solo):
+        if n.endswith((".cpp", ".h")):
+            if n not in usados_archivo:
+                errores.append(f"el listado declara `solo-windows | {n}` y ningun test de ese archivo existe solo en Windows (sobra la entrada)")
+        elif clase_de(n) not in usados_clase and clase_de(n) not in clases_no_verif:
+            errores.append(f"el listado declara `solo-windows | {n}` y esa clase no existe solo en Windows (sobra la entrada)")
+    return errores, notas, resumen
+
+
+def nombres_de_fuentes():
+    """{clase: 'Suite.Test'} de las fuentes de test, para nombrar lo que `nm` solo da como clase."""
+    wnr = cargar_wnr()
+    out = {}
+    for path in wnr.archivos_de_test(CPP, (".cpp", ".h")):
+        for m in wnr.TEST_DECL.finditer(wnr.sin_comentarios(wnr.leer(path))):
+            out[f"{m.group(2)}_{m.group(3)}_Test"] = f"{m.group(2)}.{m.group(3)}"
+    return out
+
+
+def cargar_wnr():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("wnr", os.path.join(REPO_ROOT, "scripts", "check-windows-not-run.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("wnr", mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def registro_gate(build_root, prefix, win_dir, win_by_out, jobs, runner=run):
+    """El diff de registro completo: compila la suite POSIX con el compilador del host, lee las dos con nm, compara.
+    Devuelve el exit code (0 verde)."""
+    wnr = cargar_wnr()
+    lst = wnr.leer_listado(wnr.LISTADO)
+    if lst.errores:
+        raise Fatal("el listado declarado tiene errores:\n  " + "\n  ".join(lst.errores))
+    t_win = targets_de_test(win_dir)
+    if not t_win:
+        raise Fatal(f"no encuentro ningun `*[1]_include.cmake` en {win_dir}: no se que targets registran tests")
+    posix_dir = os.path.join(build_root, "tests-posix")
+    cxx = shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")
+    if not cxx:
+        raise Fatal("no hay compilador nativo (c++/g++/clang++) en el PATH para compilar la suite POSIX del diff de registro "
+                    "(contenedor: el paquete gcc-c++ de .github/toolchain-pins.json; Mac: las Xcode command line tools)")
+    ver = subprocess.run([cxx, "--version"], capture_output=True, text=True).stdout.splitlines()[:1]
+    print(f"  registro: suite POSIX con {cxx} ({ver[0] if ver else '?'}), {BUILD_TYPE}, -Werror, build en {posix_dir}", flush=True)
+    gtest = os.path.join(win_dir, ".deps", "googletest-src")
+    os.environ.pop("CC", None); os.environ.pop("CXX", None)
+    # los objetos de test de CUALQUIER target de test que el host configure; se conoce tras configurar, asi que
+    # primero se configura (solo) y despues se compila lo que pertenece a un target de test.
+    cfg_targets = {}
+
+    def only(output):
+        m = OBJ_TARGET_RE.search(output.replace("\\", "/"))
+        return bool(m) and m.group(1) in cfg_targets
+
+    # configurar para saber que targets de test construye el host
+    os.makedirs(posix_dir, exist_ok=True)
+    cfg = ["cmake", "-S", os.path.join(CPP, "tests"), "-B", posix_dir, "-G", "Ninja", f"-DCMAKE_BUILD_TYPE={BUILD_TYPE}",
+           "-DWMA_TESTS_WERROR=ON", f"-DFETCHCONTENT_BASE_DIR={os.path.join(posix_dir, '.deps')}"]
+    if os.path.isdir(gtest):
+        cfg.append(f"-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST={gtest}")
+    r = runner(cfg, os.path.join(posix_dir, "configure.log"))
+    if r.returncode != 0:
+        raise Fatal(f"[tests-posix] cmake no configuro (log: {posix_dir}/configure.log):\n" + "\n".join(r.stdout.splitlines()[-25:]))
+    cfg_targets = {t: True for t in targets_de_test(posix_dir)}
+    srcs, fl, log, detail, by_out = build_objects("tests", os.path.join(CPP, "tests"), posix_dir, prefix, "", jobs, runner,
+                                                  native=True, gtest_src=gtest if os.path.isdir(gtest) else None, only=only)
+    print(f"  tests-posix: {len(srcs)} objetos de {len(cfg_targets)} targets de test, {len(fl)} fallan", flush=True)
+    if fl:
+        for s_ in sorted(fl):
+            print(f"  {s_}   [tests-posix]")
+            for l in error_lines(detail.get(s_, "")):
+                print(f"      {l}")
+        print(f"      (log completo: {log})")
+        raise Fatal("la suite POSIX no compila con el compilador del host: sin ella no hay diff de registro")
+
+    nm_win = find_tool([prefix + "nm", prefix + "gcc-nm"])
+    filt_win = shutil.which(prefix + "c++filt") or find_tool(["c++filt", "llvm-cxxfilt"])
+    nm_posix = find_tool(["nm", "llvm-nm"])
+    filt_posix = find_tool(["c++filt", "llvm-cxxfilt"])
+    # los objetos de Windows son TODOS los de la suite: se ordena por target de test
+    win = clases_por_target(win_dir, win_by_out, t_win, nm_win, filt_win, runner)
+    posix = clases_por_target(posix_dir, by_out, set(cfg_targets), nm_posix, filt_posix, runner)
+    posix = {t: v for t, v in posix.items() if t in cfg_targets}
+    win = {t: v for t, v in win.items() if t in t_win}
+    errores, notas, resumen = diff_registro(
+        posix, win, lst.hallazgos["posix-solo"], lst["solo-windows"], nombres_de_fuentes())
+    print("  diff de registro (clases `<Suite>_<Test>_Test::TestBody` por target):")
+    for l in resumen:
+        print(f"    {l}")
+    n_decl = sum(lst.hallazgos["posix-solo"].values())
+    print(f"    declarado: {n_decl} `posix-solo`, {len(lst['solo-windows'])} `solo-windows`")
+    for n in notas:
+        print(f"    nota: {n}")
+    if errores:
+        print(f"\nROJO — el diff de registro Windows/POSIX (AC-061.1) no coincide con lo declarado en "
+              f"audio/src/main/cpp/tests/windows-not-run.txt:")
+        for e in errores:
+            print(f"  {e}")
+        return 1
+    print("  diff de registro: OK — lo que se registra distinto en Windows es exactamente lo declarado")
+    return 0
 
 
 def guarded(fn, *args, **kw):
@@ -399,6 +682,63 @@ def red_paths_cases():
     return bad
 
 
+def registro_cases():
+    """El diff de registro (AC-061.1) en sus dos direcciones, con nm simulado (sin Docker ni compilador)."""
+    import types
+    bad = []
+    C = collections.Counter
+
+    def d(name, posix, win, decl_posix=None, decl_solo=None, rojo=False, contiene=None, nota=None):
+        errs, notas, _ = diff_registro(posix, win, C(decl_posix or []), decl_solo or {},
+                                       {"A_B_Test": "A.B", "C_D_Test": "C.D", "W_X_Test": "W.X"})
+        if bool(errs) != rojo:
+            bad.append(f"registro: {name}: esperaba {'rojo' if rojo else 'verde'}, vio {errs or 'verde'}")
+        if contiene and not any(contiene in e for e in errs):
+            bad.append(f"registro: {name}: el rojo no nombra {contiene!r}: {errs}")
+        if nota and not any(nota in n for n in notas):
+            bad.append(f"registro: {name}: falta la nota {nota!r}: {notas}")
+
+    both = {"t": {"A_B_Test": {"a.cpp"}, "C_D_Test": {"a.cpp"}}}
+    d("iguales", both, both)
+    d("un TEST compilado afuera en Windows, sin declarar", both, {"t": {"A_B_Test": {"a.cpp"}}}, rojo=True, contiene="C.D")
+    d("... declarado", both, {"t": {"A_B_Test": {"a.cpp"}}}, decl_posix=[(("t", "C.D"))])
+    d("una entrada posix-solo que sobra (Windows tambien lo compila)", both, both, decl_posix=[("t", "C.D")], rojo=True,
+      contiene="C.D")
+    d("una entrada posix-solo de un test que ya no existe", both, both, decl_posix=[("t", "Z.Z")], rojo=True)
+    d("solo-windows sin declarar", both, {"t": {**both["t"], "W_X_Test": {"w.cpp"}}}, rojo=True, contiene="W.X")
+    d("... declarado por nombre", both, {"t": {**both["t"], "W_X_Test": {"w.cpp"}}}, decl_solo={"W.X": "r"})
+    d("... declarado por archivo", both, {"t": {**both["t"], "W_X_Test": {"w.cpp"}}}, decl_solo={"w.cpp": "r"})
+    d("solo-windows por nombre que sobra", both, both, decl_solo={"W.X": "r"}, rojo=True, contiene="W.X")
+    d("solo-windows por archivo que sobra", both, both, decl_solo={"w.cpp": "r"}, rojo=True, contiene="w.cpp")
+    d("un target que Windows no configura, todo declarado", {"u": {"A_B_Test": {"a.cpp"}}}, {}, decl_posix=[("u", "A.B")])
+    d("... sin declarar", {"u": {"A_B_Test": {"a.cpp"}}}, {}, rojo=True, contiene="A.B")
+    d("un target de Windows que el host no construyo: no verificable, en verde", {}, {"t": {"A_B_Test": {"a.cpp"}}},
+      nota="NO VERIFICABLE")
+    d("... y su solo-windows por nombre no se da por sobrante", {}, {"t": {"W_X_Test": {"w.cpp"}}},
+      decl_solo={"W.X": "r"}, nota="NO VERIFICABLE")
+    d("lo declarado de un target que nadie construye: nota, en verde", both, both, decl_posix=[("zz", "A.B")], nota="zz")
+
+    sym = ("0000000000000000 T _ZN8A_B_Test8TestBodyEv\n0000000000000010 W _ZN8C_D_TestIiE8TestBodyEv\n"
+           "                 U _ZN8E_F_Test8TestBodyEv\n0000000000000020 T _ZN3Foo3barEv\n")
+    if simbolos_testbody(sym) != {"_ZN8A_B_Test8TestBodyEv", "_ZN8C_D_TestIiE8TestBodyEv"}:
+        bad.append(f"registro: nm: solo los simbolos DEFINIDOS con TestBody: {simbolos_testbody(sym)}")
+    got = clases_de_demangled(["A_B_Test::TestBody()", "(anonymous namespace)::G_H_Test::TestBody()",
+                               "C_D_Test<int>::TestBody()", "testing::Test::TestBody()", "Foo::bar()"])
+    if got != {"A_B_Test", "G_H_Test", "C_D_Test"}:
+        bad.append(f"registro: demangled: {got}")
+    with tempfile.TemporaryDirectory() as tmp:
+        for f in ("core_tests[1]_include.cmake", "x_tests[1]_tests.cmake"):
+            open(os.path.join(tmp, f), "w").close()
+        if targets_de_test(tmp) != {"core_tests"}:
+            bad.append(f"registro: targets_de_test: {targets_de_test(tmp)}")
+    by_out = {"t/CMakeFiles/t.dir/a.cpp.obj": "x/a.cpp", "gtest/CMakeFiles/gtest.dir/g.cc.obj": "g.cc"}
+    fake = lambda cmd, log=None, **kw: types.SimpleNamespace(returncode=0, stdout="0000 T _ZN8A_B_Test8TestBodyEv\n")
+    got = clases_por_target("/b", by_out, {"t"}, "nm", "filt", fake, lambda f, syms: ["A_B_Test::TestBody()"] * len(syms))
+    if got != {"t": {"A_B_Test": {"a.cpp"}}}:
+        bad.append(f"registro: clases_por_target: {got}")
+    return bad
+
+
 def self_test():
     bad = []
 
@@ -450,6 +790,7 @@ def self_test():
             os.environ["PATH"] = old
 
     bad += red_paths_cases()
+    bad += registro_cases()
 
     if bad:
         print("windows-cross --self-test: FALLA")

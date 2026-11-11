@@ -22,6 +22,7 @@ DEPS_DIR="$SRC_DIR/.deps"
 
 # AC-061.1: el listado de lo que no corre en Windows == los tests que usan WMA_WINDOWS_NOT_RUN. Es
 # estatico y barato, asi que falla ANTES de compilar; la mitad de resultados la corre run-cpp-tests.ps1.
+python3 "$REPO_ROOT/scripts/check-windows-not-run.py" --self-test >/dev/null
 python3 "$REPO_ROOT/scripts/check-windows-not-run.py"
 
 GEN_ARGS=()
