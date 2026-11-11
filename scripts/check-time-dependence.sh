@@ -357,10 +357,11 @@ fi
 rc=$?
 set -e
 
-# El resumen de ctest ("N% tests passed, F tests failed out of M") es lo unico que dice
+# El resumen de ctest ("N% tests passed, F tests failed out of M", o sin fallados:
+# "N% tests passed out of M") es lo unico que dice
 # cuantos tests corrieron. Sin el, un log truncado (OOM, rc 137) no distingue "todo verde"
 # de "no se que paso": en cualquier modo es exit 3.
-ran="$(sed -n -E 's/^[0-9]+% tests passed, [0-9]+ tests? failed out of ([0-9]+).*/\1/p' "$log" | tail -n 1)"
+ran="$(sed -n -E 's/^[0-9]+% tests passed(, [0-9]+ tests? failed)? out of ([0-9]+).*/\2/p' "$log" | tail -n 1)"
 if [ -z "$ran" ]; then
     echo "  ROTO: ctest termino (rc=$rc) sin imprimir su resumen 'tests passed ... out of N'." >&2
     echo "  El log esta truncado o ctest murio (OOM = rc 137): no se que corrio. Ultimas lineas:" >&2
