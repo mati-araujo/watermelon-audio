@@ -82,7 +82,7 @@ public:
      *
      * Se recorre UNA línea por vez sobre el bloque entero (y no todas las líneas por muestra):
      * cada comb/allpass es un bucle apretado con punteros crudos, que es lo que hace que el
-     * costo medido sea el del DSP y no el de las llamadas (build de host: ubuntu/GCC -O1, macOS y TSan -O0).
+     * costo medido sea el del DSP y no el de las llamadas (el test de costo corre en core_cost_tests, todo a -O0: MINI-057 D20).
      */
     void addReverbWetFromMono(const float* monoIn, float* stereoOut, int frames) noexcept {
         if (!mPrepared) return;

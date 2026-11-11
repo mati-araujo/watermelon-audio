@@ -507,7 +507,7 @@ Paired measurePaired(JobA&& a, JobB&& b, int pairs, int blocksPerPair) {
  * diff del log.
  *
  * El techo de las unidades era 1,0x al escribir el AC y quedo en 1,5x AL MEDIR (2026-09-15): el
- * build de host era -O0 (hoy ubuntu/GCC -O1, macOS y TSan -O0; WMA_TESTS_OPT) y ahi un Freeverb (16 combs + 8 allpass) mide 1,12x un
+ * build de host era -O0 (hoy este test vive en core_cost_tests, todo su binario a -O0 en todas las plataformas: MINI-057 D20) y ahi un Freeverb (16 combs + 8 allpass) mide 1,12x un
  * tsf de 8 voces con interpolacion lineal y sin filtro — 17 us por bloque de 2,67 ms, el 0,65 % del
  * tiempo real. La primera version, por muestra y con `vector::operator[]`, media 2,0x: lo que se
  * compro fue recorrer una linea por vez sobre el bloque con punteros crudos y evaluar el LFO del
@@ -626,11 +626,15 @@ TEST(SoundFontEffectsSendEngine, TheUnitsCostLessThanTheVoicesAndTheGateAFractio
     //   * COMPUERTA < 1,5x su barrido sin la rama. Medido 1,02x (la rama cuesta ~2 %), peor
     //     mediana 1,03x en veinte: el techo deja 46 % de margen sobre el peor visto y una
     //     dispersion de ±3 %. Y a diferencia del cociente contra tsf, este NO lo puede correr un
-    //     sanitizer: los dos lados hacen exactamente los mismos accesos a memoria, y en macOS
-    //     (Apple clang) la suite compila a -O0 POR EXCEPCION (ver tests/CMakeLists.txt, MINI-057
-    //     D15; en ubuntu/GCC es -O1 y TSan va a -O0), asi que ahi ninguno vectoriza un lado y el
-    //     otro no: Apple clang 21 a -O1 daba 3,45x. Lo que un 1,5x deja pasar es una compuerta un 50 % mas cara que el
-    //     barrido que envuelve, que ya es un defecto de la compuerta y no ruido.
+    //     sanitizer: los dos lados hacen exactamente los mismos accesos a memoria. Este test vive
+    //     en su propio ejecutable, `core_cost_tests`, y TODO ese binario compila a -O0 en todas
+    //     las plataformas (core/tests/CMakeLists.txt, MINI-057 D20), asi que ninguno vectoriza un
+    //     lado y el otro no. Hace falta el binario entero, no sólo esta TU: reverb y chorus son
+    //     `inline` y, en un ejecutable con TUs a -O1, la copia que gana el link puede ser la
+    //     optimizada. A -O1 la compuerta daba 3,45x (Apple clang 21) y 3,66x (GCC 15.2, un
+    //     intento). El resto de la suite: ubuntu -O1, macOS -O0 (D15), TSan -O0 (D6). Lo que un
+    //     1,5x deja pasar es una compuerta un 50 % mas cara que el barrido que envuelve, que ya
+    //     es un defecto de la compuerta y no ruido.
     //
     //   * UNIDADES < 3x tsf, SIN CAMBIO, y ahora por otra razon. Por la carga sola se podria bajar
     //     a 2x (1,57x el peor de veinte, y atraparia volver a la version por muestra que media
