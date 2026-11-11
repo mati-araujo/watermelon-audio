@@ -95,9 +95,22 @@ endif()
 # linea de compilacion, asi que este -O gana sobre cualquiera que traiga el tipo
 # de build (GCC y clang: el ultimo -O manda).
 # ----------------------------------------------------------------------------
-set(WMA_TESTS_OPT "-O1" CACHE STRING
-    "Optimization flag for the host test suite (e.g. -O1, or -O0 to debug)")
-add_compile_options(${WMA_TESTS_OPT} -g)
+# Excepcion declarada (MINI-057 D6): TSan compila a -O0. Medido en CI (run 42942604293,
+# GCC 15.2.0, 5 corridas): a -O1 GCC expande en linea el memcpy del payload del anillo SPSC
+# y esos accesos no llegan a TSan; una carrera sembrada en LockFreeRingBuffer da 0/5 a -O1
+# y 5/5 a -O0. ASan y UBSan sí ven sus mutaciones 5/5 a -O1 y se quedan en -O1.
+# WMA_TESTS_OPT vacio = automatico; un valor explicito siempre manda.
+set(WMA_TESTS_OPT "" CACHE STRING
+    "Optimization flag for the host test suite; empty = auto (-O1, -O0 under TSan)")
+if(WMA_TESTS_OPT)
+    set(WMA_TESTS_OPT_EFFECTIVE "${WMA_TESTS_OPT}")
+elseif(WMA_TESTS_SANITIZE MATCHES "thread")
+    set(WMA_TESTS_OPT_EFFECTIVE "-O0")
+else()
+    set(WMA_TESTS_OPT_EFFECTIVE "-O1")
+endif()
+message(STATUS "Host tests: optimization = ${WMA_TESTS_OPT_EFFECTIVE}")
+add_compile_options(${WMA_TESTS_OPT_EFFECTIVE} -g)
 
 # Fetch googletest once, here. The child suites include the same file so they
 # still configure standalone, but include_guard(GLOBAL) makes this the only
