@@ -16,6 +16,7 @@
 
 #include <jni.h>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <atomic>
 #include <cmath>
@@ -369,14 +370,27 @@ inline jfloatArray vectorToJFloatArray(JNIEnv* env, const std::vector<float>& ve
 // jint es `long` en Windows (LLP64) y `int` en el resto: mismo ancho, otro tipo, y GCC los
 // trata como alias sets distintos. Un reinterpret_cast entre `jint*` e `int*` es UB con -O3;
 // se copia elemento a elemento (capa JNI, nunca el thread de audio).
-inline std::vector<int> toIntVector(const jint* p, jsize n) {
-    return std::vector<int>(p, p + n);
+// No lanza: un std::bad_alloc no puede cruzar un JNIEXPORT (extern "C" -> std::terminate), asi que
+// devuelve false y el llamador responde con el error de su funcion.
+inline bool toIntVector(const jint* p, jsize n, std::vector<int>& out) noexcept {
+    try {
+        out.assign(p, p + n);
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+    return true;
 }
 
 inline jintArray vectorToJIntArray(JNIEnv* env, const std::vector<int>& vec) {
     jintArray result = env->NewIntArray(static_cast<jsize>(vec.size()));
     if (result != nullptr) {
-        const std::vector<jint> converted(vec.begin(), vec.end());
+        std::vector<jint> converted;
+        try {
+            converted.assign(vec.begin(), vec.end());
+        } catch (const std::bad_alloc&) {
+            env->DeleteLocalRef(result);
+            return nullptr;  // sin memoria: null, como un NewIntArray fallido
+        }
         env->SetIntArrayRegion(result, 0, static_cast<jsize>(vec.size()), converted.data());
     }
     return result;

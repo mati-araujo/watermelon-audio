@@ -801,7 +801,10 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEff
     // One state-version bump for the whole batch, not N — see AUD-6 in the
     // header. The C API used to loop over the individual setter here, so iOS
     // still had the bug this path exists to avoid.
-    const std::vector<int> idsCopy = toIntVector(ids.get(), length);
+    std::vector<int> idsCopy;
+    if (!toIntVector(ids.get(), length, idsCopy)) {
+        return JniError::MEMORY_ALLOCATION_FAILED;  // los Scoped* sueltan lo pineado
+    }
     return wma_effect_set_params_batch(g_wmaEngine, index, idsCopy.data(), vals.get(),
                                        static_cast<int>(length));
 }
@@ -834,8 +837,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMul
         return JniError::INVALID_OPERATION;
     }
 
-    const std::vector<int> indicesCopy = toIntVector(indices.get(), length);
-    const std::vector<int> paramsCopy = toIntVector(params.get(), length);
+    std::vector<int> indicesCopy;
+    std::vector<int> paramsCopy;
+    if (!toIntVector(indices.get(), length, indicesCopy) ||
+        !toIntVector(params.get(), length, paramsCopy)) {
+        return JniError::MEMORY_ALLOCATION_FAILED;  // los Scoped* sueltan lo pineado
+    }
     jint result = wma_effect_set_params_multi(g_wmaEngine, indicesCopy.data(),
                                               paramsCopy.data(), vals.get(),
                                               static_cast<int>(length));
@@ -2649,8 +2656,10 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArp
         return;
     }
     const jsize count = env->GetArrayLength(intervals);
-    const std::vector<int> copy = toIntVector(data, count);
+    std::vector<int> copy;
+    const bool copied = toIntVector(data, count, copy);
     env->ReleaseIntArrayElements(intervals, data, JNI_ABORT);
+    if (!copied) return;  // sin memoria: se conservan los intervalos actuales
     wma_arp_set_scale_intervals(g_wmaEngine, copy.data(), count);
 }
 
