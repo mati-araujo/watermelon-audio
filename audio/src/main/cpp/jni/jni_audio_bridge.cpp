@@ -3043,12 +3043,24 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     // Sizing the Java array to the ACTUAL count stays here too — same family as
     // the waveform clamp: what knows about Java array lengths lives up top.
     if (maxOnsets <= 0) return env->NewIntArray(0);
-    // std::bad_alloc no puede cruzar el JNIEXPORT: sin memoria, null (el contrato de un NewIntArray fallido).
+    // std::bad_alloc no puede cruzar el JNIEXPORT: sin memoria, OutOfMemoryError pendiente (como deja un
+    // NewIntArray fallido) y null; el `external fun` devuelve IntArray no nulo, asi que sin excepcion el
+    // null entraria a Kotlin y el NPE apareceria lejos.
+    auto throwOom = [env]() -> jintArray {
+        if (!env->ExceptionCheck()) {
+            jclass oom = env->FindClass("java/lang/OutOfMemoryError");
+            if (oom != nullptr) {
+                env->ThrowNew(oom, "nativeLooperDetectOnsets: sin memoria para los onsets");
+                env->DeleteLocalRef(oom);
+            }
+        }
+        return nullptr;
+    };
     std::vector<int> onsets;
     try {
         onsets.assign(static_cast<size_t>(maxOnsets), 0);
     } catch (...) {
-        return nullptr;
+        return throwOom();
     }
     const int n = wma_looper_detect_onsets(g_wmaEngine, trackIndex, onsets.data(),
                                           maxOnsets, hopFrames, sensitivity);
@@ -3058,7 +3070,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         try {
             converted.assign(onsets.begin(), onsets.begin() + n);
         } catch (...) {
-            return nullptr;
+            env->DeleteLocalRef(result);
+            return throwOom();
         }
         env->SetIntArrayRegion(result, 0, n, converted.data());
     }
