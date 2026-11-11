@@ -1,3 +1,4 @@
+# scratch MINI-057 base D16 (NO MERGEAR): comentario para activar los jobs C++
 # ============================================================================
 # watermelon-audio — unified host test suite
 #
