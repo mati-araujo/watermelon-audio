@@ -164,7 +164,6 @@ add_executable(core_tests
     test_soundfont_fine_tune_keytrack.cpp
     test_soundfont_envelopes.cpp
     test_soundfont_note_on_destinations.cpp
-    test_soundfont_effects_send.cpp
     test_soundfont_filter.cpp
     support/tml_impl.cpp
     test_sf_spec_conformance.cpp
@@ -240,6 +239,46 @@ target_link_libraries(core_tests PRIVATE
 
 include(GoogleTest)
 gtest_discover_tests(core_tests)
+
+# MINI-057 D20: el test de costo pareado de la compuerta de envios (SoundFontEffectsSendEngine.
+# TheUnitsCostLessThanTheVoicesAndTheGateAFractionOfThat) vive en SU PROPIO ejecutable, todo a -O0.
+# Compara lambdas cuyo costo relativo depende del optimizador y a -O1 cambia de veredicto:
+# AppleClang daba la compuerta a 3,45x contra su techo de 1,5x (run 42928259678) y GCC 15.2 a 3,66x
+# en un intento (run 42971401043). La premisa escrita del test es que NINGUN lado de sus dos pares
+# vectoriza, y eso vive en lo que ejecutan las lambdas (reverb, chorus y tsf), no en la TU.
+# Por que no un -O0 por archivo dentro de core_tests (D17, revertido): SoundFontReverb::
+# addReverbWetFromMono y SoundFontChorus::addChorusWetFromMono son `inline`; otras TUs a -O1 del
+# mismo ejecutable (test_c_api_engine_params.cpp, test_soundfont_load.cpp) emiten su copia COMDAT y
+# GNU ld se queda con la primera: el test medido a -O0 ejecutaba reverb y chorus a -O1 (unidades/tsf
+# 0,32x-0,39x contra ~1,08x en master; run 42950016735). Ningun orden de archivos ni lista de TUs lo
+# arregla de forma estable. Lo unico que no depende de quien emite la copia es que en el binario que
+# mide NO exista ninguna TU a -O1: el test, tsf, SoundFontManager.cpp y Logger.cpp (lo unico que
+# el link pide) son fuentes DEL TARGET, y el -O0 de target_compile_options va ULTIMO en la linea,
+# despues del WMA_TESTS_OPT de tests/CMakeLists.txt. De la suite a -O1 sólo se linkea
+# watermelon-dsp (.a): no aporta nada de lo medido. El resto de la suite: ubuntu -O1, macOS -O0
+# (D15), TSan -O0 (D6).
+add_executable(core_cost_tests
+    test_soundfont_effects_send.cpp
+    ${WMA_CPP_ROOT}/engines/SoundFontManager.cpp
+    ${WMA_CPP_ROOT}/platform/Logger.cpp
+    ${WMA_CPP_ROOT}/thirdparty/tinysoundfont/tsf_impl.cpp
+)
+# Mismo `-w` que el target `tinysoundfont`: es codigo de terceros.
+set_source_files_properties(${WMA_CPP_ROOT}/thirdparty/tinysoundfont/tsf_impl.cpp
+    PROPERTIES COMPILE_OPTIONS -w)
+target_compile_options(core_cost_tests PRIVATE -O0)
+target_include_directories(core_cost_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${WMA_CPP_ROOT}
+    ${WMA_CPP_ROOT}/engines
+    ${WMA_CPP_ROOT}/thirdparty/tinysoundfont
+)
+target_link_libraries(core_cost_tests PRIVATE
+    watermelon-dsp
+    GTest::gtest_main
+    Threads::Threads
+)
+gtest_discover_tests(core_cost_tests)
 
 # REQ-040, criterio de muerte (I-2): el render de host que produce el Δ_host = 1/1 − 0/0 por
 # preset. EXCLUDE_FROM_ALL a proposito: no es un test, no lo construye el gate ni el CI, y no
