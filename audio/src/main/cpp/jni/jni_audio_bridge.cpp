@@ -801,7 +801,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEff
     // One state-version bump for the whole batch, not N — see AUD-6 in the
     // header. The C API used to loop over the individual setter here, so iOS
     // still had the bug this path exists to avoid.
-    return wma_effect_set_params_batch(g_wmaEngine, index, ids.get(), vals.get(),
+    const std::vector<int> idsCopy = toIntVector(ids.get(), length);
+    return wma_effect_set_params_batch(g_wmaEngine, index, idsCopy.data(), vals.get(),
                                        static_cast<int>(length));
 }
 
@@ -833,8 +834,11 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMul
         return JniError::INVALID_OPERATION;
     }
 
-    jint result = wma_effect_set_params_multi(g_wmaEngine, indices.get(), params.get(),
-                                              vals.get(), static_cast<int>(length));
+    const std::vector<int> indicesCopy = toIntVector(indices.get(), length);
+    const std::vector<int> paramsCopy = toIntVector(params.get(), length);
+    jint result = wma_effect_set_params_multi(g_wmaEngine, indicesCopy.data(),
+                                              paramsCopy.data(), vals.get(),
+                                              static_cast<int>(length));
     if (result == JniError::SUCCESS && length > 0) {
         LOGI("nativeSetMultipleEffectParameters: applied %d updates", static_cast<int>(length));
     }
@@ -955,7 +959,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetFee
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAudioMode(
     JNIEnv* env, jobject thiz, jint mode) {
-    LOGI("AudioNativeBridge.setAudioMode: ENTER mode=%d", mode);
+    LOGI("AudioNativeBridge.setAudioMode: ENTER mode=%d", static_cast<int>(mode));
 
     if (!ensureEngine()) {
         LOGE("AudioNativeBridge.setAudioMode: engine not available");
@@ -2644,8 +2648,10 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArp
     if (!data) {
         return;
     }
-    wma_arp_set_scale_intervals(g_wmaEngine, data, env->GetArrayLength(intervals));
+    const jsize count = env->GetArrayLength(intervals);
+    const std::vector<int> copy = toIntVector(data, count);
     env->ReleaseIntArrayElements(intervals, data, JNI_ABORT);
+    wma_arp_set_scale_intervals(g_wmaEngine, copy.data(), count);
 }
 
 JNIEXPORT void JNICALL

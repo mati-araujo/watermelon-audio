@@ -1,5 +1,3 @@
 # Fuentes (ruta relativa a la raiz) cuyo objeto hoy NO compila para Windows.
 # trinquete; REQ-061 S2 lo vacia. Falla un objeto no listado y falla un listado que compila.
 # Regenerar (su diff es la revision): python3 scripts/windows-cross/check.py --update-baseline
-audio/src/main/cpp/jni/jni_audio_bridge.cpp
-audio/src/main/cpp/jni/jni_engine.cpp

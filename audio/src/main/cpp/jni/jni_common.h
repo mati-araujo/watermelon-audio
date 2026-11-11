@@ -366,10 +366,18 @@ inline jfloatArray vectorToJFloatArray(JNIEnv* env, const std::vector<float>& ve
     return result;
 }
 
+// jint es `long` en Windows (LLP64) y `int` en el resto: mismo ancho, otro tipo, y GCC los
+// trata como alias sets distintos. Un reinterpret_cast entre `jint*` e `int*` es UB con -O3;
+// se copia elemento a elemento (capa JNI, nunca el thread de audio).
+inline std::vector<int> toIntVector(const jint* p, jsize n) {
+    return std::vector<int>(p, p + n);
+}
+
 inline jintArray vectorToJIntArray(JNIEnv* env, const std::vector<int>& vec) {
     jintArray result = env->NewIntArray(static_cast<jsize>(vec.size()));
     if (result != nullptr) {
-        env->SetIntArrayRegion(result, 0, static_cast<jsize>(vec.size()), vec.data());
+        const std::vector<jint> converted(vec.begin(), vec.end());
+        env->SetIntArrayRegion(result, 0, static_cast<jsize>(vec.size()), converted.data());
     }
     return result;
 }

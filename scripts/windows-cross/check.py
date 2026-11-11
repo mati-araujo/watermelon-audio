@@ -4,9 +4,11 @@
 # Windows x64, con -Werror, SIN ejecutar nada.
 #
 # Compila los OBJETOS (no linkea) de dos CMakes, cruzando con MinGW-w64:
-#   - desktop/CMakeLists.txt : los objetos de produccion que lista (la DLL y su
-#     link son de una etapa posterior);
+#   - desktop/CMakeLists.txt : los objetos de produccion que lista;
 #   - tests/CMakeLists.txt   : la suite de host.
+# `--dll` es el otro paso: construye la DLL de desktop/CMakeLists.txt en Release
+# (-O3, -Werror, -static) y verifica con check-jni-symbols.py --pe / --imports que
+# exporta exactamente las JNIEXPORT y que importa solo KERNEL32 y la UCRT.
 #
 # Mismo build type que la suite de host en la Mac (run-cpp-tests.sh) y en la
 # nativa de Windows (run-cpp-tests.ps1): Debug. El veredicto del cruce tiene que
@@ -23,6 +25,7 @@
 #
 #   python3 scripts/windows-cross/check.py                    # el gate
 #   python3 scripts/windows-cross/check.py --update-baseline  # reescribe el baseline
+#   python3 scripts/windows-cross/check.py --dll              # la DLL Release (AC-061.5), aparte
 #   python3 scripts/windows-cross/check.py --self-test
 #
 # Build dir persistente (incremental): build/windows-cross/<prefijo>/ (`/build`
@@ -46,13 +49,15 @@ BASELINE = os.path.join(HERE, "baseline.txt")
 TOOLCHAIN = os.path.join(HERE, "toolchain.cmake")
 DEFAULT_PREFIX = "x86_64-w64-mingw32-"
 BUILD_TYPE = "Debug"
+DLL_BUILD_TYPE = "Release"
+SYMBOLS_PY = os.path.join(REPO_ROOT, "scripts", "check-jni-symbols.py")
 
 JNI_MD_WIN32 = """\
 #ifndef _JAVASOFT_JNI_MD_H_
 #define _JAVASOFT_JNI_MD_H_
 #define JNIEXPORT __declspec(dllexport)
 #define JNIIMPORT __declspec(dllimport)
-#define JNICALL __stdcall
+#define JNICALL
 typedef long jint;
 typedef long long jlong;
 typedef signed char jbyte;
@@ -272,6 +277,39 @@ def error_lines(text, limit=6):
     return out[:limit]
 
 
+def dll_gate(build_root, java_home, jobs, objdump, runner=run):
+    """La DLL de produccion (desktop/CMakeLists.txt) en Release, y sus dos verificaciones. Un rojo en
+    cualquiera es rojo: 0 si construye y exporta/importa lo esperado, 1 si no."""
+    build_dir = os.path.join(build_root, "dll")
+    os.makedirs(build_dir, exist_ok=True)
+    cfg = ["cmake", "-S", os.path.join(CPP, "desktop"), "-B", build_dir, "-G", "Ninja",
+           f"-DCMAKE_BUILD_TYPE={DLL_BUILD_TYPE}", f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}",
+           f"-DWMA_JAVA_HOME={java_home}", "-DWMA_DESKTOP_WERROR=ON"]
+    r = runner(cfg, os.path.join(build_dir, "configure.log"))
+    if r.returncode != 0:
+        raise Fatal("[dll] cmake no configuro:\n" + "\n".join(r.stdout.splitlines()[-25:]))
+    log = os.path.join(build_dir, "ninja.log")
+    r = runner(["ninja", "-C", build_dir, f"-j{jobs}"], log)
+    if r.returncode != 0:
+        print(f"ROJO — la DLL no construye (log: {log}):")
+        for l in (error_lines(r.stdout) or r.stdout.splitlines()[-15:]):
+            print(f"  {l}")
+        return 1
+    dlls = glob.glob(os.path.join(build_dir, "watermelon_audio.dll"))
+    if len(dlls) != 1:
+        raise Fatal(f"[dll] esperaba {build_dir}/watermelon_audio.dll (sin prefijo lib) y no esta")
+    rc = 0
+    for modo in ("--pe", "--imports"):
+        r = runner([sys.executable, SYMBOLS_PY, modo, dlls[0], "--objdump", objdump])
+        print(r.stdout.rstrip())
+        if r.returncode != 0:
+            print(f"windows-cross: ROJO — check-jni-symbols.py {modo} sobre la DLL")
+            rc = 1
+    if rc == 0:
+        print("windows-cross: OK — la DLL Release exporta lo esperado e importa solo KERNEL32 y la UCRT")
+    return rc
+
+
 def main(argv):
     update = "--update-baseline" in argv
     prefix = os.environ.get("WMA_CROSS_PREFIX") or DEFAULT_PREFIX
@@ -291,6 +329,13 @@ def main(argv):
         REPO_ROOT, "build", "windows-cross", prefix.rstrip("-"))
     java_home = make_java_home(build_root)
     jobs = os.cpu_count() or 4
+    if "--dll" in argv:
+        objdump = shutil.which(prefix + "objdump")
+        if not objdump:
+            raise Fatal(f"no encuentro {prefix}objdump en el PATH (lo necesita check-jni-symbols.py --pe)")
+        print(f"windows-cross: {gxx} (GCC {got}), {DLL_BUILD_TYPE}, -Werror, -static, DLL en "
+              f"{os.path.join(build_root, 'dll')}", flush=True)
+        return dll_gate(build_root, java_home, jobs, objdump)
     print(f"windows-cross: {gxx} (GCC {got}), {BUILD_TYPE}, -Werror, build en {build_root}", flush=True)
     return gate(argv, build_root, prefix, java_home, jobs,
                 registro=lambda win_dir, win_by_out, fallan: registro_gate(build_root, prefix, win_dir, win_by_out, jobs,
@@ -878,6 +923,27 @@ def self_test():
                 bad.append("el mensaje no dice como instalarlo")
         finally:
             os.environ["PATH"] = old
+
+    class _R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout = rc, out
+
+    def fake(fallan=()):
+        def runner(cmd, log_path=None, **kw):
+            if cmd[0] == "ninja" and "ninja" in fallan:
+                return _R(1, "FAILED: x.obj\nx.cpp:1:1: error: boom\n")
+            if len(cmd) > 2 and cmd[2] in fallan:
+                return _R(1, "rojo")
+            return _R(0, "ok")
+        return runner
+
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "dll"))
+        open(os.path.join(tmp, "dll", "watermelon_audio.dll"), "w").close()
+        eq("dll: todo verde", guarded(dll_gate, tmp, "/jh", 1, "od", fake()), 0)
+        eq("dll: --pe rojo", guarded(dll_gate, tmp, "/jh", 1, "od", fake(("--pe",))), 1)
+        eq("dll: --imports rojo", guarded(dll_gate, tmp, "/jh", 1, "od", fake(("--imports",))), 1)
+        eq("dll: no construye", guarded(dll_gate, tmp, "/jh", 1, "od", fake(("ninja",))), 1)
 
     bad += red_paths_cases()
     bad += registro_cases()

@@ -391,11 +391,13 @@ gate_cpp_tests_macos() {
 
 gate_windows_cross() {
     say "windows-cross — el arbol compila para Windows (MinGW-w64, -Werror, sin ejecutar)"
-    # REQ-061: compila los OBJETOS de desktop/ y de la suite de host. El self-test primero,
+    # REQ-061: compila los OBJETOS de desktop/ y de la suite de host, y la DLL Release. El self-test primero,
     # como los lints: un parser de `FAILED:` roto dejaria el gate verde para siempre.
     # Baseline-trinquete en scripts/windows-cross/baseline.txt (lo vacia REQ-061 S2).
     step windows-cross self-test  python3 scripts/windows-cross/check.py --self-test || return 1
     step windows-cross objects    python3 scripts/windows-cross/check.py || return 1
+    # AC-061.5: la DLL Release (-O3, -Werror, -static), con sus exports e imports verificados.
+    step windows-cross dll        python3 scripts/windows-cross/check.py --dll || return 1
 }
 
 gate_ios() {

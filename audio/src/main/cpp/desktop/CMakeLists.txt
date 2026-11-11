@@ -18,6 +18,8 @@
 # Backend por plataforma (el unico punto que nombra backends sigue siendo
 # backends/PlatformBackends.cpp):
 #   - macOS: CoreAudioBackend (AVAudioEngine + HAL), PlatformApple.cpp;
+#   - Windows: MinGW-w64 UCRT64 (GCC), `watermelon_audio.dll`, backend null por ahora
+#     (WASAPI es otro REQ), PlatformWindows.cpp + MappedFileWindows.cpp;
 #   - Linux/otros: backend null (createSystemAudioBackend() devuelve nullptr),
 #     PlatformAndroid.cpp, que es POSIX salvo lo que guarda __ANDROID__. D8: se
 #     prepara, no se prueba.
@@ -30,6 +32,11 @@ if(APPLE)
     project(watermelon_audio_desktop CXX OBJCXX)
 else()
     project(watermelon_audio_desktop CXX)
+endif()
+
+if(MSVC OR (WIN32 AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU"))
+    message(FATAL_ERROR "El build de Windows es MinGW-w64 UCRT64 (GCC); ni MSVC ni clang-cl "
+                        "(compilador observado: ${CMAKE_CXX_COMPILER_ID}).")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -140,6 +147,16 @@ if(APPLE)
     # La carga es por ruta absoluta dentro del bundle (ADR-0009 §4). El install name
     # queda `@rpath/libwatermelon_audio.dylib` (default de CMake en macOS): otra dylib
     # del mismo directorio la resuelve con un rpath `@loader_path`, sin rutas del build.
+elseif(WIN32)
+    # `watermelon_audio.dll`, no `libwatermelon_audio.dll`: NativeLibraryLoader.desktop.kt
+    # hace System.loadLibrary("watermelon_audio").
+    set_target_properties(watermelon_audio PROPERTIES PREFIX "")
+    # -static lleva libstdc++, libgcc Y winpthread dentro de la DLL; con sólo
+    # -static-libstdc++ -static-libgcc queda importando libwinpthread-1.dll.
+    # Los exports son SOLO los JNIEXPORT (__declspec(dllexport) del jni_md.h): con un
+    # símbolo dllexport, ld deja de exportar todo, y WMA_API es vacío sin WMA_BUILDING_DLL.
+    # Nada de --export-all-symbols ni .def.
+    target_link_options(watermelon_audio PRIVATE -static "LINKER:--no-undefined")
 else()
     # Un simbolo indefinido tiene que ser error de LINK, no un UnsatisfiedLinkError
     # al cargar (mismo criterio que tests/hostjni/).
