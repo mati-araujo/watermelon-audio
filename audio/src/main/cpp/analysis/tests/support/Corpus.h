@@ -7,6 +7,8 @@
  */
 #pragma once
 
+#include <gtest/gtest.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -99,7 +101,9 @@ inline std::string makeTempDir() {
 inline void removeTempDir(const std::string& dir) {
     if (dir.empty() || dir.find("/tmp/wma-corpus-") != 0) return;   // paranoia
     const std::string cmd = "rm -rf '" + dir + "'";
-    (void)std::system(cmd.c_str());
+    const int status = std::system(cmd.c_str());
+    if (status != 0) ADD_FAILURE() << "no se pudo borrar el directorio temporal " << dir
+                                   << " (status " << status << ")";
 }
 
 }  // namespace wma_test::corpus

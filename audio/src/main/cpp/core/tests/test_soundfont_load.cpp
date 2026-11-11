@@ -89,9 +89,9 @@ public:
             // el caso real de loadFromFd en Android y el único que ejercita el
             // alineado de la región de mmap de punta a punta.
             std::vector<uint8_t> junk(prefixBytes, 0xAB);
-            ::write(mFd, junk.data(), junk.size());
+            writeAll(junk.data(), junk.size());
         }
-        ::write(mFd, sf2.data(), sf2.size());
+        writeAll(sf2.data(), sf2.size());
         ::lseek(mFd, 0, SEEK_SET);
     }
 
@@ -105,6 +105,14 @@ public:
     int64_t offset() const { return static_cast<int64_t>(mOffset); }
 
 private:
+    // Una escritura corta deja un .sf2 truncado: el test fallaria por otra razon, lejos de la causa.
+    void writeAll(const void* data, size_t size) {
+        const ssize_t n = ::write(mFd, data, size);
+        if (n < 0 || static_cast<size_t>(n) != size) {
+            ADD_FAILURE() << "no se pudo escribir el .sf2 temporal (" << n << " de " << size << " bytes)";
+        }
+    }
+
     int mFd = -1;
     std::string mPath;
     size_t mOffset = 0;
