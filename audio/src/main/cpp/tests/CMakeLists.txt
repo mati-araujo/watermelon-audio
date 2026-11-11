@@ -82,6 +82,23 @@ if(WMA_TESTS_SANITIZE)
     add_link_options(-fsanitize=${WMA_TESTS_SANITIZE})
 endif()
 
+# ----------------------------------------------------------------------------
+# Optimizacion de la suite — host test build ONLY. Un solo punto para la suite
+# normal, ASan/UBSan, TSan y macOS (MINI-057 D5).
+#
+# -O1 -g, con CMAKE_BUILD_TYPE=Debug conservado: NDEBUG sigue sin definirse y los
+# assert() siguen vivos. A -O0 los tests que miden DSP pagaban entre 4 y 12 veces
+# lo que cuestan optimizados. -O1 es el nivel que recomiendan ASan y TSan.
+# -DWMA_TESTS_OPT=-O0 sirve para depurar.
+#
+# add_compile_options va DESPUES de CMAKE_CXX_FLAGS y CMAKE_CXX_FLAGS_DEBUG en la
+# linea de compilacion, asi que este -O gana sobre cualquiera que traiga el tipo
+# de build (GCC y clang: el ultimo -O manda).
+# ----------------------------------------------------------------------------
+set(WMA_TESTS_OPT "-O1" CACHE STRING
+    "Optimization flag for the host test suite (e.g. -O1, or -O0 to debug)")
+add_compile_options(${WMA_TESTS_OPT} -g)
+
 # Fetch googletest once, here. The child suites include the same file so they
 # still configure standalone, but include_guard(GLOBAL) makes this the only
 # fetch. The version lives ONLY in thirdparty/googletest.cmake (REQ-047 S4);
@@ -147,3 +164,16 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../usb/tests     usb_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../usb/tests/libusb libusb_descriptor_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../core/tests    core_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../analysis/tests analysis_tests)
+
+# Excepcion a WMA_TESTS_OPT (MINI-057 D11): esta TU se compila a -O0 a proposito.
+# El test SoundFontEffectsSendEngine.TheUnitsCostLessThanTheVoicesAndTheGateAFractionOfThat
+# compara el costo de la compuerta de envios contra su mismo barrido sin la rama, y las
+# dos lambdas viven en esta TU. Su techo de 1,5x presupone que ninguno de los dos lados
+# se vectoriza; a -O1 Apple clang 21 vectoriza el barrido sin rama y no el que tiene rama,
+# y el cociente da 3,45x sin que la compuerta haya cambiado. A -O0 mide lo que siempre midio.
+# Va despues del add_subdirectory porque la propiedad de un fuente es de su directorio, y
+# COMPILE_OPTIONS del fuente se agrega despues de las del target.
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests/test_soundfont_effects_send.cpp
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests
+    PROPERTIES COMPILE_OPTIONS -O0)

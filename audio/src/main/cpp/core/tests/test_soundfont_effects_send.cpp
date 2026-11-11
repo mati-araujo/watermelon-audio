@@ -621,9 +621,9 @@ TEST(SoundFontEffectsSendEngine, TheUnitsCostLessThanTheVoicesAndTheGateAFractio
     //   * COMPUERTA < 1,5x su barrido sin la rama. Medido 1,02x (la rama cuesta ~2 %), peor
     //     mediana 1,03x en veinte: el techo deja 46 % de margen sobre el peor visto y una
     //     dispersion de ±3 %. Y a diferencia del cociente contra tsf, este NO lo puede correr un
-    //     sanitizer: los dos lados hacen exactamente los mismos accesos a memoria, y todos los
-    //     builds de test son Debug/-O0 (sanitizers incluidos), asi que ninguno vectoriza un lado
-    //     y el otro no. Lo que un 1,5x deja pasar es una compuerta un 50 % mas cara que el
+    //     sanitizer: los dos lados hacen exactamente los mismos accesos a memoria, y esta TU se
+    //     compila a -O0 POR EXCEPCION (sanitizers incluidos; el resto de la suite va a -O1, ver
+    //     tests/CMakeLists.txt, MINI-057 D11), asi que ninguno vectoriza un lado y el otro no. Lo que un 1,5x deja pasar es una compuerta un 50 % mas cara que el
     //     barrido que envuelve, que ya es un defecto de la compuerta y no ruido.
     //
     //   * UNIDADES < 3x tsf, SIN CAMBIO, y ahora por otra razon. Por la carga sola se podria bajar
