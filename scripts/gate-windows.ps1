@@ -10,7 +10,8 @@
 
     QUE ESCRIBE Y DONDE
       en el repo   SOLO los build dirs de la suite, declarados en $AllowedIgnoredWrites
-                   (audio/src/main/cpp/tests/build, ignorado por git). Cualquier otra cosa es rojo.
+                   (audio/src/main/cpp/tests/build y audio/src/main/cpp/tests/.deps/googletest-build,
+                   ignorados por git; el resto de .deps es lectura). Cualquier otra cosa es rojo.
       fuera        -WorkDir: build de la DLL (dll\), launcher JVM (jvm\), fotos del paso repo (snap\).
 
     El paso repo compara el arbol antes y despues:
@@ -124,7 +125,7 @@ function Get-Jdk {
 }
 
 # Unico permiso de escritura en el repo: los build dirs ignorados de la suite (relativos a la raiz, con /).
-$AllowedIgnoredWrites = @('audio/src/main/cpp/tests/build')
+$AllowedIgnoredWrites = @('audio/src/main/cpp/tests/build', 'audio/src/main/cpp/tests/.deps/googletest-build')
 
 function Invoke-Git {
     param([Parameter(Mandatory)][string]$Root, [string[]]$GitArgs)
@@ -142,8 +143,15 @@ function Get-TreeSnapshot {
     $diffHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $diffFile).Hash
     Remove-Item -Force $diffFile
     $untracked = New-Object System.Collections.ArrayList
-    $raw = (& git -C $Root ls-files --others --exclude-standard -z | Out-String)
-    if ($LASTEXITCODE -ne 0) { throw "git ls-files fallo (rc=$LASTEXITCODE)" }
+    # PS 5.1 decodifica la salida de un exe con [Console]::OutputEncoding (OEM): un `diseño.md` llegaria roto
+    # y Get-FileHash no lo encontraria. git emite UTF-8 con -z (sin comillas).
+    $encBefore = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $raw = (& git -C $Root ls-files --others --exclude-standard -z | Out-String)
+        $lsRc = $LASTEXITCODE
+    } finally { [Console]::OutputEncoding = $encBefore }
+    if ($lsRc -ne 0) { throw "git ls-files fallo (rc=$lsRc)" }
     foreach ($f in @(($raw -split "`0") | ForEach-Object { $_.Trim("`r", "`n") } | Where-Object { $_ })) {
         $h = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root $f)).Hash
         [void]$untracked.Add("$h  $f")
@@ -189,10 +197,13 @@ function Invoke-RepoSelfTest {
     Invoke-Git $root @('add', '-A') | Out-Null
     Invoke-Git $root @('commit', '-q', '-m', 'base') | Out-Null
     # Estado inicial "sucio": un versionado ya modificado y un untracked.
+    # [char]0xF1 y no el literal: PS 5.1 lee este archivo (sin BOM) como ANSI.
+    $nonAscii = "dise$([char]0xF1)o.md"
     $dirty = {
         Invoke-Git $root @('checkout', '-q', '--', 'tracked.txt') | Out-Null
         Add-Content -Path (Join-Path $root 'tracked.txt') -Value 'dirty'
         Set-Content -Path (Join-Path $root 'untracked.txt') -Value 'u' -Encoding ASCII
+        Set-Content -Path (Join-Path $root $nonAscii) -Value 'd' -Encoding ASCII
         foreach ($rm in 'build', 'out', 'sub\nuevo.txt') {
             $pth = Join-Path $root $rm
             if (Test-Path $pth) { Remove-Item -Recurse -Force $pth }
@@ -210,6 +221,9 @@ function Invoke-RepoSelfTest {
             Add-Content -Path (Join-Path $root 'tracked.txt') -Value 'mas' } },
         @{ Name = 'untracked con otro contenido'; Want = $true; Do = {
             Set-Content -Path (Join-Path $root 'untracked.txt') -Value 'otro' -Encoding ASCII } },
+        @{ Name = 'untracked no ASCII, sin cambios'; Want = $false; Do = { } },
+        @{ Name = 'untracked no ASCII, otro contenido'; Want = $true; Do = {
+            Set-Content -Path (Join-Path $root $nonAscii) -Value 'otro' -Encoding ASCII } },
         @{ Name = 'untracked nuevo'; Want = $true; Do = {
             Set-Content -Path (Join-Path $root 'sub\nuevo.txt') -Value 'n' -Encoding ASCII } },
         @{ Name = 'ignorado nuevo no declarado'; Want = $true; Do = {
