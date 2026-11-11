@@ -507,7 +507,7 @@ Paired measurePaired(JobA&& a, JobB&& b, int pairs, int blocksPerPair) {
  * diff del log.
  *
  * El techo de las unidades era 1,0x al escribir el AC y quedo en 1,5x AL MEDIR (2026-09-15): el
- * build de host es -O0 (`run-cpp-tests.sh`) y ahi un Freeverb (16 combs + 8 allpass) mide 1,12x un
+ * build de host era -O0 (hoy ubuntu/GCC -O1, macOS y TSan -O0; WMA_TESTS_OPT) y ahi un Freeverb (16 combs + 8 allpass) mide 1,12x un
  * tsf de 8 voces con interpolacion lineal y sin filtro — 17 us por bloque de 2,67 ms, el 0,65 % del
  * tiempo real. La primera version, por muestra y con `vector::operator[]`, media 2,0x: lo que se
  * compro fue recorrer una linea por vez sobre el bloque con punteros crudos y evaluar el LFO del
@@ -590,10 +590,15 @@ TEST(SoundFontEffectsSendEngine, TheUnitsCostLessThanTheVoicesAndTheGateAFractio
     const double nsGate = gate.nsA;
     const double nsBlock = 1e9 * kBlock / rate;
 
-    std::printf("  [REQ-040] costo por bloque de 128 a 48 kHz (-O0): tsf 8 voces %.0f ns · reverb %.0f + chorus %.0f = "
+#ifdef __OPTIMIZE__
+    constexpr const char* kOptLabel = "(optimizado)";
+#else
+    constexpr const char* kOptLabel = "(-O0)";
+#endif
+    std::printf("  [REQ-040] costo por bloque de 128 a 48 kHz %s: tsf 8 voces %.0f ns · reverb %.0f + chorus %.0f = "
                 "%.0f ns (%.2fx tsf, %.2f %% del tiempo real) · compuerta %.0f ns (%.1f %% de tsf)"
                 " · pareado (mediana de %d pares de %d bloques): unidades %.2fx tsf [%.2f–%.2f] · "
-                "compuerta %.2fx su barrido sin la rama [%.2f–%.2f]\n", nsTsf, nsRev,
+                "compuerta %.2fx su barrido sin la rama [%.2f–%.2f]\n", kOptLabel, nsTsf, nsRev,
                 nsCho, nsUnits, nsUnits / nsTsf, 100.0 * nsUnits / nsBlock, nsGate, 100.0 * nsGate / nsTsf,
                 kPairs, kBlocksPerPair, units.median, units.lo, units.hi,
                 gate.median, gate.lo, gate.hi);
