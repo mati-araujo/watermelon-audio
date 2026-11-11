@@ -23,6 +23,7 @@ WavSinkTest.BugB_AnAbortResidueBelongsOnlyToTheTakeThatLeftIt | el hilo escritor
 # --- variantes: la PREMISA o el estimulo cambia en Windows, la asercion no ---
 variante | WavSinkTest.BugB_AbortPartNeverRemovesAFileItDidNotCreate | en POSIX el .part ajeno se arma con std::rename encima del .part vivo; en Windows (share mode 0) se arma haciendo fallar finishPart contra un destino ocupado, que cierra el archivo, y reemplazando el .part cerrado. Las aserciones son las mismas
 variante | OutputProfiles.ProtectedIsTheTwoTwentyThreeOutputBitForBit | el golden de 2.23.0 es de macOS arm64 (otra libm da otro ultimo bit): solo ahi se ejecuta, en el resto sale SKIPPED con el mensaje declarado como `ambiente`; la prueba estructural cubre el resto
+variante | SongApi.AC_055_13_ABurstOfPublicationsAgainstTheCallbackAllocatesNothingAndNeverTears | REQ-061 D13: en Windows no se evalua SOLO la asercion de CPU maximo por callback contra el periodo (5333 us); siguen las alocaciones, el desgarro, las adopciones y el printf `rafaga`. Medido: sin carga mediana 330 us y picos de 4594 us (86 % del periodo), bajo ctest -j 12 picos de 5733 us: ruido del SO que QueryThreadCycleTime le carga al hilo. La medicion del peor caso en Windows pasa a REQ-062
 
 # --- ambiente: skips que dependen de lo que hay instalado o del build, no de la plataforma ---
 ambiente | ERROR_PRIVILEGE_NOT_HELD: crear symlinks | crear un symlink pide modo desarrollador o SeCreateSymbolicLinkPrivilege; la junction y el reparse point ajeno (sin privilegio) cubren lo mismo

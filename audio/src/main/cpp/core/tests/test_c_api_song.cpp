@@ -646,8 +646,10 @@ TEST_F(SongApi, AC_055_13_ABurstOfPublicationsAgainstTheCallbackAllocatesNothing
                 static_cast<long long>(wma_song_get_late_adoptions(live.e)), maxUs,
                 kPeriodNs / 1000.0);
 #ifndef WMA_TEST_UNDER_SANITIZER
+#if !defined(_WIN32)   // REQ-061 D13: en Windows el CPU maximo por callback es ruido del SO, no se evalua
     EXPECT_LT(static_cast<double>(maxNs.load()), kPeriodNs)
         << "un callback tardo mas que su periodo";
+#endif
 #endif
     live.tearDown();
 }
