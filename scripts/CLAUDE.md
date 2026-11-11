@@ -33,7 +33,13 @@ camino critico de un PR atestado (`local_first.md` §2).
   `sleep_for(120ms)` es tiempo absoluto y el render lento le da MAS margen). Colapsar la
   espera: 10/10 en 2 s. Cubre UNA clase; no ve una espera POR CONDICION que se vuelve
   inalcanzable ni las esperas de AUSENCIA (falso VERDE). El script lo imprime.
-- `check-cpp-portability.sh` (WA-0.4): `jni.h` / `android/` fuera de su capa.
+- `check-cpp-portability.sh` (WA-0.4, REQ-061 AC-061.7): regla 1, `jni.h` / `android/` fuera de su capa; regla 2, una API
+  sólo-POSIX o sólo-Windows fuera de su capa (`platform/`, el backend de su plataforma, `usb/`, `jni/`), por header Y por
+  SÍMBOLO suelto medido (`lstat`, `link(`, `O_NOFOLLOW`...: viven en headers que MinGW sí tiene, así que un lint de headers no
+  los ve; comentarios y strings se ignoran). Dos baselines, TRINQUETES en las dos direcciones (una violación no listada falla,
+  una entrada que ya no se reproduce falla), hoy vacíos: `cpp-portability-baseline.txt` (`ruta|API`) y
+  `windows-cross/baseline.txt` (fuentes cuyo objeto no compila para Windows). Su diff es la revisión; nunca se agrega una
+  entrada para acallar un rojo. `--self-test` primero.
 - `check-windows-not-run.py` (REQ-061 AC-061.1): lo que NO corre en Windows se declara, no se esconde. El listado
   `tests/windows-not-run.txt` lleva `Suite.Test | razon` (test POSIX por naturaleza: `WMA_WINDOWS_NOT_RUN("razon")`,
   `tests/support/WindowsNotRun.h`) y las secciones `variante` (cuerpo con un `#if` de plataforma), `ambiente`
@@ -67,7 +73,7 @@ camino critico de un PR atestado (`local_first.md` §2).
      estatico, un `gtest_discover_tests` directo fuera de `function(wma_gtest_discover_tests)` (se declara como `cmake`).
   🔴 El inventario `fuera` obliga a DECLARAR cada `#if` de plataforma fuera de un cuerpo, pero no juzga si la razon es
   cierta: que no cambie lo que el test afirma se revisa a mano.
-- `windows-cross/check.py` (REQ-061, `gate.sh --only windows-cross`; Mac con Homebrew o contenedor Fedora, `build-image.sh`):
+- `windows-cross/check.py` (REQ-061, `gate.sh --only windows-cross`; también compila la DLL Release de `desktop/` (`--dll`: -O3, -Werror, -static) y corre `check-jni-symbols.py --pe/--imports` sobre ella; Mac con Homebrew o contenedor Fedora, `build-image.sh`):
   (a) compila los OBJETOS de `desktop/` y de la suite de host para Windows (MinGW-w64, Debug, `-Werror`), baseline-trinquete
   sobre FUENTES (`windows-cross/baseline.txt`); (b) compila la suite POSIX con el compilador NATIVO del host (Mac: el de
   Xcode; contenedor: `gcc-c++`, pineado en `toolchain-pins.json`) en `build/windows-cross/<prefijo>/tests-posix`, y compara
@@ -80,10 +86,20 @@ camino critico de un PR atestado (`local_first.md` §2).
   los DOS lados (sus clases no se cuentan en ninguno) y se informa cual; un target de test sin NINGUN objeto vivo es ROJO.
   TYPED_TEST_P (`gtest_suite_<S>_::<N><T>::TestBody()`) se mapea a `S_N_Test`; los nombres se JUNTAN, nunca se parten por
   `_` (el arbol tiene tests con `_` y ninguna suite con `_`; `Suite_With_Underscores` esta en el self-test). En la Mac no se pudo medir desde la PC Windows: ahi el diff usa `nm` + `c++filt` de Xcode.
+- `gate-windows.ps1` (REQ-061): el gate LOCAL de la PC Windows (MSYS2 UCRT64), PowerShell 5.1; no atesta, no baja nada y
+  no escribe en el árbol (compara `git status --porcelain --ignored` antes y después). Pasos: `pin` (el GCC es el de
+  `toolchain-pins.json`, lógica compartida en `windows-toolchain.ps1` con `run-cpp-tests.ps1`), `lint`, `suite`
+  (`run-cpp-tests.ps1 -TimeoutSec 180`: ctest con timeout por test), `dll` (build Release en `%LOCALAPPDATA%\Temp\wma-gate-windows`,
+  `--pe`/`--imports`), `jvm` (`System.loadLibrary` + `nativeIsEngineInitialized()==false` con PATH reducido; `-SkipJvm` lo
+  salta y lo dice), `repo`. Fija `SetErrorMode` antes de lanzar hijos: un crash o `abort()` vuelve solo, sin diálogo de WER.
+  `-Only <paso>` sirve para iterar y NO cuenta como corrida completa. La suite construye en `tests/build` (ignorado).
 - `check-jni-signatures.py` (REQ-025): la FIRMA del cruce JNI. 🔴 Su guarda de COMPLETITUD lo
   sostiene: si el parser abarca menos prototipos de los que hay en el arbol, FALLA. Sin baseline:
   nacio en cero desajustes. Las tres preguntas: `audio/src/main/cpp/jni/CLAUDE.md`.
-- `check-jni-symbols.py` (MINI-001): sólo NOMBRES contra el `.so`.
+- `check-jni-symbols.py` (MINI-001): sólo NOMBRES contra el `.so`. REQ-061: `--pe DLL` exige exports == `external fun` menos
+  USB (el `.def`/`--export-all-symbols` no existen: salen sólo los `JNIEXPORT`) e `--imports DLL` exige que la DLL importe
+  sólo `KERNEL32.dll` y `api-ms-win-crt-*` (un runtime que no viaja dentro, como `libwinpthread-1.dll`, es rojo). Ambos leen
+  `objdump -p` (`--objdump X` o `$OBJDUMP`).
 - La ruta del bridge Kotlin que leen `check-jni-symbols`, `check-jni-signatures` y
   `check-doc-counts` es UNA constante: `jni_bridge_source.py` (el source set, REQ-055 S1).
 - `check-release-flags.py` (MINI-036): las flags EFECTIVAS del `.so` de `assembleRelease` en las 4
