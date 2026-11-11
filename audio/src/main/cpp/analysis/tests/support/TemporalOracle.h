@@ -97,7 +97,9 @@ struct TemporalReading {
  *                    todo lo que quede de nota desde `fromSec`, acotado por esto (18 = 5,9 s
  *                    a 44,1 kHz, o sea: toda la nota del corpus)
  */
-inline TemporalReading measurePeriod(const std::vector<float>& mono, int sampleRate,
+// noinline: inlinada en un test con un vector corto de tamano conocido, GCC -O3 no relaciona su size()
+// con el largo de lo que reservo y avisa -Warray-bounds sobre un camino que el guard `disponible` corta.
+[[gnu::noinline]] inline TemporalReading measurePeriod(const std::vector<float>& mono, int sampleRate,
                                      double nominalHz, double fromSec = 1.5,
                                      int windowLog2 = 18, double spanFraction = 0.03) {
     TemporalReading out;

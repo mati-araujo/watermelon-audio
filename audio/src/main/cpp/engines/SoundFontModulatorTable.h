@@ -246,7 +246,7 @@ inline std::uint32_t* rejectionSlotFor(const Modulator& m, RejectionCounters& c)
 inline bool classify(const Modulator& m, NoteOnModulator& out) {
     RejectionCounters scratch;
     if (rejectionSlotFor(m, scratch) != nullptr) return false;
-    NoteSource primary, secondary;
+    NoteSource primary = NoteSource::Constant, secondary = NoteSource::Constant;
     classifyNoteSource(m.srcOper, primary);
     classifyNoteSource(m.amtSrcOper, secondary);
     out.destOper = m.destOper;
