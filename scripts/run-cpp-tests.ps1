@@ -29,6 +29,10 @@
     test is its own process with its own temp names, so they do not share state; lower it to debug a
     flake, never raise a timeout.
 
+.PARAMETER TimeoutSec
+    ctest --timeout: seconds per test before ctest kills it and reports it failed (0 = ctest's default).
+    scripts/gate-windows.ps1 passes 180, like the sanitizer runs in CLAUDE.md.
+
 .PARAMETER Fast
     Skip Stress/Slow tests. Like -Filter it runs fewer tests, so the not-run
     check tolerates listed tests that do not show up (--partial).
@@ -43,7 +47,8 @@ param(
     [string]$Filter,
     [switch]$Clean,
     [switch]$Fast,
-    [int]$Jobs = 0
+    [int]$Jobs = 0,
+    [int]$TimeoutSec = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,55 +62,13 @@ $SrcDir   = Join-Path $RepoRoot 'audio\src\main\cpp\tests'
 $BuildDir = Join-Path $SrcDir 'build'
 $DepsDir  = Join-Path $SrcDir '.deps'
 
-function Find-First {
-    param([string[]]$Candidates, [string]$OnPath)
-    if ($OnPath) {
-        $cmd = Get-Command $OnPath -ErrorAction SilentlyContinue
-        if ($cmd) { return $cmd.Source }
-    }
-    foreach ($c in $Candidates) {
-        if ($c -and (Test-Path $c)) { return $c }
-    }
-    return $null
-}
-
-# ---- locate cmake -------------------------------------------------------
-$sdkRoot = if ($env:ANDROID_HOME) { $env:ANDROID_HOME }
-           elseif ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT }
-           else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
-
-$cmakeBin = Find-First -OnPath 'cmake' -Candidates @(
-    'C:\Program Files\CMake\bin\cmake.exe',
-    (Join-Path $sdkRoot 'cmake\3.22.1\bin\cmake.exe')
-)
-if (-not $cmakeBin) { throw "cmake not found. Install CMake or the Android SDK 'cmake;3.22.1' package." }
-
-# ---- locate ninja (generator) ------------------------------------------
-$ninjaBin = Find-First -OnPath 'ninja' -Candidates @(
-    (Join-Path $sdkRoot 'cmake\3.22.1\bin\ninja.exe'),
-    'C:\msys64\ucrt64\bin\ninja.exe'
-)
-if (-not $ninjaBin) { throw "ninja not found. It ships with the Android SDK 'cmake;3.22.1' package." }
-
-# ---- locate g++ / gcc (compiler) ---------------------------------------
-# The toolchain is pinned in .github/toolchain-pins.json, the single source of
-# the root and of the GCC version (scripts/check-dep-pins.py enforces it).
-$PinsFile = Join-Path $RepoRoot '.github\toolchain-pins.json'
-if (-not (Test-Path $PinsFile)) { throw "$PinsFile not found: cannot read the pinned MSYS2 UCRT64 toolchain." }
-$msys2 = (Get-Content -Raw -Encoding UTF8 $PinsFile | ConvertFrom-Json)._windows_cross.msys2_ucrt64
-if (-not $msys2 -or -not $msys2.root -or -not $msys2.gcc) {
-    throw "$PinsFile has no _windows_cross.msys2_ucrt64 {root, gcc}."
-}
-$gxx = Join-Path $msys2.root 'bin\g++.exe'
-if (-not (Test-Path $gxx)) {
-    throw "MSYS2 UCRT64 g++ not found at $gxx. Install it from an MSYS2 shell: 'pacman -S mingw-w64-ucrt-x86_64-gcc' (package $($msys2.package) $($msys2.package_version)). mingw64 is NOT an accepted fallback: it is a different C runtime."
-}
-$gccVersion = (& $gxx -dumpfullversion).Trim()
-if ($gccVersion -ne $msys2.gcc) {
-    throw "$gxx is GCC '$gccVersion' but .github/toolchain-pins.json pins '$($msys2.gcc)' (package $($msys2.package) $($msys2.package_version)). Install that version, or change the pin deliberately."
-}
-$gcc      = Join-Path (Split-Path -Parent $gxx) 'gcc.exe'
-$mingwBin = Split-Path -Parent $gxx
+# cmake, ninja and the pinned MSYS2 UCRT64 g++ (root + GCC version from .github/toolchain-pins.json,
+# the single source; scripts/check-dep-pins.py enforces it). Shared with scripts/gate-windows.ps1.
+. (Join-Path $PSScriptRoot 'windows-toolchain.ps1')
+$tc = Get-WmaHostToolchain -RepoRoot $RepoRoot
+$cmakeBin, $ninjaBin, $gxx, $gcc = $tc.Cmake, $tc.Ninja, $tc.Gxx, $tc.Gcc
+$gccVersion = $tc.GccVersion
+$mingwBin = $tc.MingwBin
 
 # UCRT64 exes need their runtime DLLs (libstdc++-6, libgcc_s_seh-1,
 # libwinpthread-1) on PATH when ctest launches them.
@@ -151,8 +114,9 @@ if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
 if (Test-Path $ResultsDir) { Remove-Item -Recurse -Force $ResultsDir }
 New-Item -ItemType Directory -Force -Path $ResultsDir | Out-Null
 
-$ctestBin = Join-Path (Split-Path -Parent $cmakeBin) 'ctest.exe'
+$ctestBin = $tc.Ctest
 $ctestArgs = @('--test-dir', $BuildDir, '--output-on-failure', '-j', $Jobs)
+if ($TimeoutSec -gt 0) { $ctestArgs += @('--timeout', $TimeoutSec) }
 if ($Filter) { $ctestArgs += @('-R', $Filter) }
 # -Fast: skip slow stress tests (name contains Stress/Slow) for a tight
 # edit -> test loop. They still run in CI and in an unflagged local run.
