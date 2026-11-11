@@ -722,9 +722,11 @@ TEST(McLeodPitchTest, AC0342_AscentVersusFullRefinementOverTheWholeControlSet) {
         // test dio timeout bajo TSan a -j4 en el gate de REQ-034.1 (la clase que MINI-020 acaba
         // de cerrar). La medicion que importa sale del build normal, con los 448.
         Tally t;
+#ifdef WMA_TEST_UNDER_SANITIZER
         int par = 0;
+#endif
         for (const auto& cuerda : catalogStrings())
-            for (int nPart = 1; nPart <= 4; ++nPart, ++par) {
+            for (int nPart = 1; nPart <= 4; ++nPart) {
                 int combo = 0;
                 for (const int rate : {44100, 48000})
                     for (const double B : {0.0, 1e-4})
@@ -738,6 +740,9 @@ TEST(McLeodPitchTest, AC0342_AscentVersusFullRefinementOverTheWholeControlSet) {
                                     std::string(cuerda.name) + " @" + std::to_string(rate) + " n=" +
                                         std::to_string(nPart) + " B=" + std::to_string(B));
                         }
+#ifdef WMA_TEST_UNDER_SANITIZER
+                ++par;
+#endif
             }
         EXPECT_GT(t.windows, 0); print("matriz pobre (448 x 2 s; 56 bajo sanitizer)", t); add(total, t);
     }
