@@ -47,6 +47,15 @@
 #   --full                   -> la suite entera (push a master)
 #   sin MANIFEST / otro arbol / corrida filtrada / nombre que ctest no registra
 #                            -> la suite entera, y dice por que. Falla cerrado.
+#   MANIFEST valido pero sin el probe positivo en la traza
+#                            -> exit 3, "traza ciega": nunca se cae a la suite entera, porque
+#                               eso taparia justo la ceguera que el probe existe para delatar.
+#
+# UN NOMBRE DE LA TRAZA PUEDE SER VARIOS TESTS DE CTEST: el mismo test compilado en mas de un
+# binario (looper_tests y looper_tests_dense) se registra dos veces con el mismo
+# --gtest_filter, y la traza lo ve una sola vez (un archivo por nombre). Se corren TODOS los
+# numeros que le corresponden. La afirmacion es "tests corridos == numeros elegidos", no
+# "== nombres"; ambas cantidades se imprimen.
 #
 # INVARIANTE (D4, escrito para que alguien lo rompa a sabiendas): HOY las llamadas a
 # `sleepFixed` son incondicionales en su camino. La traza solo ve un test que llego a
@@ -222,12 +231,10 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 log="$work/ctest.log"
 select_file="$work/select"
 mode=trace; why=""
-nsel=0; sel_names=""
+nsel=0; nnames=0; nmulti=0; sel_names=""
 
 if [ $full -eq 1 ]; then
     mode=full; why="--full: suite entera (push a master, D4)"
-elif ! command -v python3 >/dev/null 2>&1; then
-    mode=full; why="no hay python3 para leer el json de ctest"
 elif [ ! -f "$TRACE_DIR/MANIFEST" ]; then
     mode=full; why="no hay $TRACE_DIR/MANIFEST (la suite no corrio entera con run-cpp-tests.sh)"
 else
@@ -241,7 +248,19 @@ else
         mode=full; why="el MANIFEST es de otro arbol ($man_tree) y no del actual ($stamp)"
     elif [ "$man_traced" != "$have_traced" ]; then
         mode=full; why="el MANIFEST dice $man_traced trazas y el directorio tiene $have_traced"
+    elif [ ! -e "$TRACE_DIR/$PROBE_POS" ]; then
+        # El MANIFEST es valido (mismo sello, misma cuenta) y aun asi falta el probe
+        # positivo, que llama a sleepFixed a escala 1 en la corrida entera: algo dejo de
+        # escribir la traza. Caer a la suite entera aca taparia la ceguera (AC-057.3).
+        echo "  ROTO: el MANIFEST es valido pero el probe positivo ($PROBE_POS)" >&2
+        echo "  no esta en la traza ($man_traced trazas): sleepFixed no la escribio, traza ciega." >&2
+        echo "  Un verde de aca seria ceguera, no ausencia de defectos." >&2
+        exit 3
     fi
+fi
+
+if [ "$mode" = trace ] && ! command -v python3 >/dev/null 2>&1; then
+    mode=full; why="no hay python3 para leer el json de ctest"
 fi
 
 if [ "$mode" = trace ]; then
@@ -286,15 +305,19 @@ if absent:
     bail("la traza nombra tests que ctest no registra: " + ", ".join(absent[:5]))
 if not names:
     bail("la traza no tiene ningun test aparte del probe")
+# Un nombre mapea a UNO O MAS numeros (el mismo test en varios binarios): se eligen todos.
 nums = sorted({i for n in names for i in by_filter[n]})
-if len(nums) != len(names):
-    bail("%d nombres en la traza corresponden a %d tests de ctest" % (len(names), len(nums)))
+multi = [n for n in names if len(by_filter[n]) > 1]
 
 with open(select_path, "w") as f:
     f.write("0,0,0," + ",".join(str(n) for n in nums) + "\n")
 print(len(nums))
+print(len(names))
+print(len(multi))
 for n in names:
-    print(n)
+    ids = by_filter[n]
+    print(n if len(ids) == 1 else "%s  (%d tests de ctest: %s)" % (
+        n, len(ids), ", ".join("#%d" % i for i in ids)))
 PY
 
 if [ "$mode" = trace ]; then
@@ -303,7 +326,9 @@ if [ "$mode" = trace ]; then
         "$select_file" "${PROBE_POS%%.*}." 2>&1)" || py_rc=$?
     if [ $py_rc -eq 0 ]; then
         nsel="$(printf '%s\n' "$sel_out" | sed -n 1p)"
-        sel_names="$(printf '%s\n' "$sel_out" | sed 1d)"
+        nnames="$(printf '%s\n' "$sel_out" | sed -n 2p)"
+        nmulti="$(printf '%s\n' "$sel_out" | sed -n 3p)"
+        sel_names="$(printf '%s\n' "$sel_out" | sed 1,3d)"
     else
         mode=full; why="$(printf '%s\n' "$sel_out" | tail -n 1)"
         [ $py_rc -eq 10 ] || why="el mapeo de la traza fallo (python3 rc=$py_rc): $why"
@@ -312,14 +337,9 @@ fi
 
 echo
 if [ "$mode" = trace ]; then
-    # La traza esta ciega si ni el probe positivo (que llama a sleepFixed a escala 1 en
-    # la corrida entera) aparece: algo dejo de escribirla y un verde seria ceguera.
-    if [ ! -e "$TRACE_DIR/$PROBE_POS" ]; then
-        echo "  ROTO: el probe positivo ($PROBE_POS) no esta en la traza." >&2
-        echo "  Un test que llama a sleepFixed no la escribio: la traza esta ciega." >&2
-        exit 3
-    fi
-    echo "== suite con las esperas ciegas colapsadas: $nsel tests de la traza =="
+    echo "== suite con las esperas ciegas colapsadas: $nnames nombres en la traza -> $nsel tests de ctest =="
+    echo "  (un nombre puede ser varios tests de ctest: el mismo test en mas de un binario."
+    echo "   Se corren todos; $nmulti nombre(s) mapean a mas de uno. Se elige por numero, con -I.)"
     printf '%s\n' "$sel_names" | sed 's/^/   /'
 else
     echo "== suite ENTERA con las esperas ciegas colapsadas =="
@@ -337,17 +357,34 @@ fi
 rc=$?
 set -e
 
+# El resumen de ctest ("N% tests passed, F tests failed out of M") es lo unico que dice
+# cuantos tests corrieron. Sin el, un log truncado (OOM, rc 137) no distingue "todo verde"
+# de "no se que paso": en cualquier modo es exit 3.
+ran="$(sed -n -E 's/^[0-9]+% tests passed, [0-9]+ tests? failed out of ([0-9]+).*/\1/p' "$log" | tail -n 1)"
+if [ -z "$ran" ]; then
+    echo "  ROTO: ctest termino (rc=$rc) sin imprimir su resumen 'tests passed ... out of N'." >&2
+    echo "  El log esta truncado o ctest murio (OOM = rc 137): no se que corrio. Ultimas lineas:" >&2
+    tail -n 15 "$log" | sed 's/^/   /' >&2
+    exit 3
+fi
 if [ "$mode" = trace ]; then
-    ran="$(grep -oE 'tests failed out of [0-9]+' "$log" | grep -oE '[0-9]+$' | tail -n 1 || true)"
     if [ "$ran" != "$nsel" ]; then
-        echo "  ROTO: se eligieron $nsel tests y ctest corrio ${ran:-ninguno}." >&2
+        echo "  ROTO: se eligieron $nsel tests de ctest ($nnames nombres de la traza) y ctest corrio $ran." >&2
         echo "  La seleccion por numero no hizo lo que dice: un verde seria ceguera." >&2
         exit 3
     fi
-    echo "  corridos: $ran de $nsel elegidos"
+    echo "  corridos: $ran de $nsel elegidos ($nnames nombres en la traza)"
+else
+    echo "  corridos: $ran"
 fi
 
 failed="$(sed -n '/The following tests FAILED:/,$p' "$log" | grep -E '^\s+[0-9]+ - ' || true)"
+if [ "$rc" -ne 0 ] && [ -z "$failed" ]; then
+    echo "  ROTO: ctest salio con rc=$rc pero no pude extraer ningun test fallado del log." >&2
+    echo "  No se puede declarar verde algo que ctest dio por rojo. Ultimas lineas:" >&2
+    tail -n 15 "$log" | sed 's/^/   /' >&2
+    exit 3
+fi
 
 # ---------------------------------------------------------------------------
 # El falso verde que este bloque existe para impedir.
