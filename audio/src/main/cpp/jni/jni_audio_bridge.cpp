@@ -3043,12 +3043,23 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     // Sizing the Java array to the ACTUAL count stays here too — same family as
     // the waveform clamp: what knows about Java array lengths lives up top.
     if (maxOnsets <= 0) return env->NewIntArray(0);
-    std::vector<int> onsets(static_cast<size_t>(maxOnsets), 0);
+    // std::bad_alloc no puede cruzar el JNIEXPORT: sin memoria, null (el contrato de un NewIntArray fallido).
+    std::vector<int> onsets;
+    try {
+        onsets.assign(static_cast<size_t>(maxOnsets), 0);
+    } catch (...) {
+        return nullptr;
+    }
     const int n = wma_looper_detect_onsets(g_wmaEngine, trackIndex, onsets.data(),
                                           maxOnsets, hopFrames, sensitivity);
     jintArray result = env->NewIntArray(n);
     if (result && n > 0) {
-        const std::vector<jint> converted(onsets.begin(), onsets.begin() + n);
+        std::vector<jint> converted;
+        try {
+            converted.assign(onsets.begin(), onsets.begin() + n);
+        } catch (...) {
+            return nullptr;
+        }
         env->SetIntArrayRegion(result, 0, n, converted.data());
     }
     return result;
@@ -3087,7 +3098,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDetect
                                     capacity, hopFrames, sensitivity);
     env->ReleaseFloatArrayElements(stereo, samples, JNI_ABORT);
     if (n > 0) {
-        const std::vector<jint> converted(onsets.begin(), onsets.begin() + n);
+        std::vector<jint> converted;
+        try {
+            converted.assign(onsets.begin(), onsets.begin() + n);
+        } catch (...) {
+            return static_cast<jint>(WMA_ERROR_MEMORY);
+        }
         env->SetIntArrayRegion(out, 0, n, converted.data());
     }
     return static_cast<jint>(n);
@@ -3119,7 +3135,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         const int maxPoints = std::min({static_cast<int>(frames.size()),
                                         static_cast<int>(hz.size()),
                                         static_cast<int>(confidence.size())});
-        std::vector<int> frameBuf(static_cast<size_t>(std::max(maxPoints, 0)), 0);
+        std::vector<int> frameBuf;
+        try {
+            frameBuf.assign(static_cast<size_t>(std::max(maxPoints, 0)), 0);
+        } catch (...) {
+            return 0;  // los Scoped* sueltan lo pineado; 0 puntos, como un array invalido
+        }
         written = wma_looper_analyze_pitch(g_wmaEngine, trackIndex, hopMs,
                                            frameBuf.data(), hz.get(),
                                            confidence.get(), maxPoints, &hopFrames);
