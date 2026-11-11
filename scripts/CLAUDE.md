@@ -60,6 +60,11 @@ camino critico de un PR atestado (`local_first.md` §2).
      no lo corrio: `-E`, `TEST_FILTER`, `DISABLED`), ningun `<failure>` aunque ctest haya salido 0, todo skip declarado
      (marcador contra el listado, ambiente por prefijo, sin mensaje = rojo). `--partial` (`-Filter`/`-Fast`) tolera los
      registrados sin XML; un `<failure>` sigue rojo. Si Smart App Control no deja ejecutar un exe para listarlo, es ROJO.
+     🔴 TODO es POR TARGET: el XML de `gtest-xml/<target>/` ata cada test a su exe (`looper_tests` y `looper_tests_dense`
+     registran los mismos 207 nombres: un conjunto global dejaba que el XML de uno tapara al otro). Un test registrado por
+     un exe necesita SU XML en SU directorio; el skip del listado se compara por target (corre en uno y se saltea en otro =
+     rojo). Rojo tambien: un `*_include.cmake` sin `TEST_XML_OUTPUT_DIR` (o que no termina en el nombre del target) y,
+     estatico, un `gtest_discover_tests` directo fuera de `function(wma_gtest_discover_tests)` (se declara como `cmake`).
   🔴 El inventario `fuera` obliga a DECLARAR cada `#if` de plataforma fuera de un cuerpo, pero no juzga si la razon es
   cierta: que no cambie lo que el test afirma se revisa a mano.
 - `windows-cross/check.py` (REQ-061, `gate.sh --only windows-cross`; Mac con Homebrew o contenedor Fedora, `build-image.sh`):
@@ -71,7 +76,10 @@ camino critico de un PR atestado (`local_first.md` §2).
   Windows - POSIX == `solo-windows`, por target. Un target que el host no construye es «no verificable en este host» (se
   informa, en verde). 🔴 NO ve: un `INSTANTIATE_TEST_SUITE_P` que solo existe en un lado (la clase del TEST_P esta en los
   dos; lo caza la estatica), ni nada que cambie sin cambiar la lista de clases (eso es el `--results` de Windows), ni
-  corre nada. En la Mac no se pudo medir desde la PC Windows: ahi el diff usa `nm` + `c++filt` de Xcode.
+  corre nada. Una fuente de tests que NO compila para Windows (en el baseline) no frena el diff: se excluyen sus objetos de
+  los DOS lados (sus clases no se cuentan en ninguno) y se informa cual; un target de test sin NINGUN objeto vivo es ROJO.
+  TYPED_TEST_P (`gtest_suite_<S>_::<N><T>::TestBody()`) se mapea a `S_N_Test`; los nombres se JUNTAN, nunca se parten por
+  `_` (el arbol tiene tests con `_` y ninguna suite con `_`; `Suite_With_Underscores` esta en el self-test). En la Mac no se pudo medir desde la PC Windows: ahi el diff usa `nm` + `c++filt` de Xcode.
 - `check-jni-signatures.py` (REQ-025): la FIRMA del cruce JNI. 🔴 Su guarda de COMPLETITUD lo
   sostiene: si el parser abarca menos prototipos de los que hay en el arbol, FALLA. Sin baseline:
   nacio en cero desajustes. Las tres preguntas: `audio/src/main/cpp/jni/CLAUDE.md`.

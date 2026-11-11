@@ -564,7 +564,19 @@ def analizar_cmake(root, lst):
     for dirpath, path in cm_archivos_de_test(root):
         rel = norm(os.path.relpath(path, root))
         pila = []     # [es_de_plataforma, rotulo de la rama vigente, condicion del if]
+        en_wrapper = 0   # dentro de function(wma_gtest_discover_tests): el unico lugar que llama al gtest_discover_tests directo
+        otras_fn = 0
         for nombre, args, no in cm_comandos(leer(path)):
+            if nombre in ('function', 'macro'):
+                if args.split()[:1] == ['wma_gtest_discover_tests'] and not otras_fn:
+                    en_wrapper += 1
+                else:
+                    otras_fn += 1
+            elif nombre in ('endfunction', 'endmacro'):
+                if otras_fn:
+                    otras_fn -= 1
+                else:
+                    en_wrapper = max(0, en_wrapper - 1)
             if nombre == 'if':
                 pila.append([bool(CM_PLATFORM.search(args)), 'if(%s)' % args, args])
                 continue
@@ -585,6 +597,9 @@ def analizar_cmake(root, lst):
 
             msgs = []
             hallazgo = msgs.append
+            if nombre == 'gtest_discover_tests' and not en_wrapper:
+                hallazgo('gtest_discover_tests directo: registra sin XML_OUTPUT_DIR por target (usar '
+                         'wma_gtest_discover_tests); sin eso --results no ata cada test a su exe')
             if CM_FILTRO.search(args):
                 hallazgo('DISABLED/TEST_FILTER/gtest_filter en un CMake de tests: un test que no corre sin declarar')
             if CM_EXCLUDE.search(args):
@@ -663,28 +678,36 @@ def chequeo_estatico(root, listado):
 
 # ------------------------------------------------------------- resultados
 
+def target_de_xml(directorio, dirpath):
+    """El target (exe) de un XML: el primer subdirectorio bajo `directorio` (`gtest-xml/<target>/`, lo que fija
+    TEST_XML_OUTPUT_DIR); un XML suelto en la raiz no pertenece a ningun target ('')."""
+    partes = os.path.relpath(dirpath, directorio).split(os.sep)
+    return partes[0] if partes[0] != '.' else ''
+
+
 def saltos_de_xml(directorio):
-    """{ 'Suite.Test': mensaje } de todo skip en los XML de gtest; ademas, el conjunto de los vistos."""
-    saltos, vistos = {}, set()
+    """({target: {'Suite.Test': mensaje}} de todo skip, {target: set(Suite.Test)} de los vistos, n de XML). looper_tests y
+    looper_tests_dense registran los mismos nombres: un conjunto global dejaba que el XML de uno tapara al otro."""
+    saltos, vistos = collections.defaultdict(dict), collections.defaultdict(set)
     xmls = []
     for dirpath, _, filenames in os.walk(directorio):
-        xmls += [os.path.join(dirpath, f) for f in filenames if f.endswith('.xml')]
-    for path in sorted(xmls):
+        xmls += [(target_de_xml(directorio, dirpath), os.path.join(dirpath, f)) for f in filenames if f.endswith('.xml')]
+    for target, path in sorted(xmls):
         tree = ET.parse(path)
         for tc in tree.iter('testcase'):
             if tc.get('status') is None:
                 continue   # el XML de `--gtest_list_tests` (discovery de ctest): lista, no corrio nada
             nombre = '%s.%s' % (tc.get('classname'), tc.get('name'))
-            vistos.add(nombre)
+            vistos[target].add(nombre)
             sk = tc.find('skipped')
             if sk is None and tc.get('status') == 'notrun':
-                saltos[nombre] = 'DISABLED'
+                saltos[target][nombre] = 'DISABLED'
             elif sk is not None:
                 msg = (sk.get('message') or sk.text or '')
                 # gtest antepone `archivo:linea`; lo que importa es lo que el test dijo.
                 cuerpo = [l for l in msg.replace('&#x0A;', '\n').splitlines()
                           if l.strip() and not re.fullmatch(r'.*:\d+\s*', l.strip())]
-                saltos[nombre] = ' '.join(cuerpo)
+                saltos[target][nombre] = ' '.join(cuerpo)
     return saltos, vistos, len(xmls)
 
 
@@ -749,7 +772,7 @@ def parsear_lista(salida):
 
 
 def descubrir_ejecutables(build_dir):
-    """[(target, exe, cwd, filtro, args)] de los `<target>[1]_include.cmake` que escribe gtest_discover_tests: lo
+    """[(target, exe, cwd, filtro, args, xml_dir)] de los `<target>[1]_include.cmake` que escribe gtest_discover_tests: lo
     que ctest va a ejecutar de verdad."""
     out = []
     for dirpath, _, filenames in os.walk(build_dir):
@@ -764,7 +787,7 @@ def descubrir_ejecutables(build_dir):
             exe = campo('TEST_EXECUTABLE')
             if exe:
                 out.append((os.path.basename(exe).rsplit('.exe', 1)[0], exe, campo('TEST_WORKING_DIR') or dirpath,
-                            campo('TEST_FILTER'), campo('TEST_EXTRA_ARGS')))
+                            campo('TEST_FILTER'), campo('TEST_EXTRA_ARGS'), campo('TEST_XML_OUTPUT_DIR')))
     return sorted(out)
 
 
@@ -791,7 +814,13 @@ def registrados_de(build_dir, ejecutar=ejecutar_lista):
     exes = descubrir_ejecutables(build_dir)
     if not exes:
         return regs, ['no hay ningun `*_include.cmake` de gtest_discover_tests en %s: no se sabe que exes tiene la suite' % build_dir]
-    for target, exe, cwd, filtro, args in exes:
+    for target, exe, cwd, filtro, args, xml_dir in exes:
+        if not xml_dir.strip():
+            errores.append('%s: su *_include.cmake no tiene TEST_XML_OUTPUT_DIR: sus tests no dejan XML por target '
+                           '(wma_gtest_discover_tests + WMA_GTEST_XML_DIR)' % target)
+        elif os.path.basename(xml_dir.rstrip('/\\')) != target:
+            errores.append('%s: TEST_XML_OUTPUT_DIR=%r no termina en el nombre del target: sus XML caerian en otro '
+                           'directorio' % (target, xml_dir))
         if filtro.strip():
             errores.append('%s: gtest_discover_tests con TEST_FILTER=%r: registra menos de lo que el exe tiene' % (target, filtro))
         if args.strip():
@@ -817,32 +846,35 @@ def chequeo_resultados(directorio, listado, parcial, registrados=None):
         return ['no hay XML de gtest en %s: la corrida no los genero' % directorio], notas
     for nombre, tag in sorted(fallos_de_xml(directorio).items()):
         errores.append('%s: <%s> en el XML (un test que falla no se acepta aunque ctest haya salido 0)' % (nombre, tag))
-    if registrados is not None:
+    if registrados is not None and not parcial:
         deshab = set(lst['deshabilitado'])
         for target in sorted(registrados):
-            if parcial:
-                continue
-            sin = sorted(n for n in registrados[target] - vistos
+            if target not in vistos:
+                errores.append('%s: no hay ningun XML en %s/%s/: ctest no corrio nada de este exe' % (target, directorio, target))
+            sin = sorted(n for n in registrados[target] - vistos.get(target, set())
                          if not any(n == d or n.startswith(d + '/') for d in deshab))
             for n in sin[:25]:
-                errores.append('%s: %s esta registrado (--gtest_list_tests) y no tiene XML: ctest no lo corrio '
-                               '(TEST_FILTER, DISABLED, -E, un filtro...)' % (target, n))
+                errores.append('%s: %s esta registrado (--gtest_list_tests) y no tiene XML en el directorio de este target: '
+                               'ctest no lo corrio (TEST_FILTER, DISABLED, -E, un filtro...)' % (target, n))
             if len(sin) > 25:
                 errores.append('%s: ... y %d registrados mas sin XML' % (target, len(sin) - 25))
     entradas = lst.no_run
-    marcados = {n for n, m in saltos.items() if MARCADOR in m}
-    for nombre in sorted(marcados - set(entradas)):
-        errores.append('%s salio SKIPPED con %s pero no esta en el listado' % (nombre, MARCADOR))
-    for nombre in sorted(set(entradas) - marcados):
-        if nombre in vistos:
-            errores.append('%s esta en el listado pero NO salio saltado con %s (corre o se salteo por otra razon)'
-                           % (nombre, MARCADOR))
-        elif not parcial:
+    for target in sorted(saltos):
+        for nombre in sorted(n for n, m in saltos[target].items() if MARCADOR in m and n not in entradas):
+            errores.append('%s: %s salio SKIPPED con %s pero no esta en el listado' % (target or '(raiz)', nombre, MARCADOR))
+    for nombre in sorted(entradas):
+        donde = [t for t in sorted(vistos) if nombre in vistos[t]]
+        for t in donde:
+            if MARCADOR not in saltos.get(t, {}).get(nombre, ''):
+                errores.append('%s: %s esta en el listado pero NO salio saltado con %s en este target (corre o se '
+                               'salteo por otra razon)' % (t or '(raiz)', nombre, MARCADOR))
+        if not donde and not parcial:
             errores.append('%s esta en el listado pero no aparece en los resultados' % nombre)
+    otros = {(t, n): m for t in saltos for n, m in saltos[t].items() if not (MARCADOR in m and n in entradas)}
     prefijos = lst['ambiente']
     usados = set()
-    for nombre in sorted(set(saltos) - marcados):
-        msg = saltos[nombre]
+    for (target, nombre), msg in sorted(otros.items()):
+        nombre = '%s: %s' % (target or '(raiz)', nombre)
         if not msg:
             errores.append('%s: skip SIN mensaje' % nombre)
         elif msg == 'DISABLED':
@@ -1178,7 +1210,17 @@ def self_test():
         caso('E3 un .cmake incluido: add_compile_definitions bajo if(UNIX) -> rojo', True,
              estatico('e3_gt_def', cmake=INC, extra={GTC: 'if(UNIX)\n  add_compile_definitions(WMA_SKIP=1)\nendif()\n'}))
         caso('E3 un .cmake incluido sin nada de plataforma -> verde', False,
-             estatico('e3_gt_ok', cmake=INC, extra={GTC: 'function(w t)\n  gtest_discover_tests(${t} XML_OUTPUT_DIR x)\nendfunction()\n'}))
+             estatico('e3_gt_ok', cmake=INC, extra={GTC: 'function(wma_gtest_discover_tests t)\n'
+                                                   '  gtest_discover_tests(${t} XML_OUTPUT_DIR x)\nendfunction()\n'}))
+        caso('E3 gtest_discover_tests directo en un CMake de tests -> rojo', True,
+             [e for e in estatico('e3_directo', cmake='add_executable(t test_a.cpp)\ngtest_discover_tests(t)\n')
+              if 'gtest_discover_tests directo' in e or 'wma_gtest_discover_tests' in e])
+        caso('E3 gtest_discover_tests directo en una funcion que NO es el wrapper -> rojo', True,
+             [e for e in estatico('e3_directo_fn', cmake=INC, extra={GTC: 'function(otra t)\n  gtest_discover_tests(${t})\n'
+                                                                     'endfunction()\n'})
+              if 'wma_gtest_discover_tests' in e])
+        caso('E3 wma_gtest_discover_tests en un CMake de tests -> verde', False,
+             estatico('e3_wrapper', cmake='add_executable(t test_a.cpp)\nwma_gtest_discover_tests(t)\n'))
         caso('E3 un .cmake que NINGUN test incluye (produccion) con if(WIN32) -> verde', False,
              estatico('e3_prod_cmake', extra={'thirdparty/otra.cmake': 'if(WIN32)\n  add_compile_definitions(X=1)\nendif()\n'}))
         caso('E3 el .cmake incluido por otro .cmake incluido cuenta -> rojo', True,
@@ -1199,11 +1241,13 @@ def self_test():
 
         # R — lo que cada exe registra contra los XML, y los <failure>
         def reg_xml(nombre, casos, registrados, listado='S.A | r\n', parcial=False):
+            """casos: lista (un target 't') o {target: lista}; el XML de cada uno cuelga de <base>/<target>/."""
             base = os.path.join(tmp, nombre)
-            cuerpo = ''.join('<testcase name="%s" status="run" classname="%s">%s</testcase>' % (
-                c[1], c[0], '<failure message="boom"/>' if len(c) > 2 and c[2] == 'failure' else
-                ('<skipped message="%s"/>' % c[2] if len(c) > 2 else '')) for c in casos)
-            _w(base, 'x.xml', '<testsuites><testsuite name="x">%s</testsuite></testsuites>' % cuerpo)
+            for target, cs in (casos if isinstance(casos, dict) else {'t': casos}).items():
+                cuerpo = ''.join('<testcase name="%s" status="run" classname="%s">%s</testcase>' % (
+                    c[1], c[0], '<failure message="boom"/>' if len(c) > 2 and c[2] == 'failure' else
+                    ('<skipped message="%s"/>' % c[2] if len(c) > 2 else '')) for c in cs)
+                _w(base, '%s/x.xml' % target, '<testsuites><testsuite name="x">%s</testsuite></testsuites>' % cuerpo)
             return chequeo_resultados(base, _w(base, 'l.txt', listado), parcial, registrados)[0]
 
         MARC = MARCADOR + ' razon'
@@ -1226,19 +1270,38 @@ def self_test():
         caso('R3 ... y el typed sin XML -> rojo', True,
              reg_xml('r3_param_no', [('S', 'A', MARC), ('Inst/P', 'T/0')],
                      {'t': {'S.A', 'Inst/P.T/0', 'Ty/1.U'}}))
+        DOS = {'looper': {'SongFade.X'}, 'looper_dense': {'SongFade.X'}}
+        caso('R3 dos targets registran el mismo nombre y cada uno tiene su XML -> verde', False,
+             reg_xml('r3_dos_ok', {'looper': [('SongFade', 'X')], 'looper_dense': [('SongFade', 'X')]}, DOS, listado=''))
+        caso('R3 dos targets registran el mismo nombre y el XML esta SOLO en uno -> rojo nombrando el otro', True,
+             [e for e in reg_xml('r3_dos_tapa', {'looper': [('SongFade', 'X')]}, DOS, listado='') if 'looper_dense' in e])
+        caso('R3 ... aunque el otro target tenga XML de OTROS tests -> rojo', True,
+             [e for e in reg_xml('r3_dos_otros', {'looper': [('SongFade', 'X')], 'looper_dense': [('Otro', 'Y')]}, DOS,
+                                 listado='') if 'looper_dense' in e and 'SongFade.X' in e])
+        caso('R3 un test del listado que en un target se saltea y en otro CORRE -> rojo', True,
+             [e for e in reg_xml('r3_skip_mixto', {'a': [('S', 'A', MARC)], 'b': [('S', 'A')]},
+                                 {'a': {'S.A'}, 'b': {'S.A'}}) if e.startswith('b:')])
+        caso('R3 un test del listado saltado con marcador en los dos targets -> verde', False,
+             reg_xml('r3_skip_ambos', {'a': [('S', 'A', MARC)], 'b': [('S', 'A', MARC)]}, {'a': {'S.A'}, 'b': {'S.A'}}))
+        caso('R3 un skip de ambiente en un target y corre en otro -> verde (no es del listado)', False,
+             reg_xml('r3_amb_mixto', {'a': [('S', 'A', MARC), ('S', 'C', 'sin corpus grabado')], 'b': [('S', 'A', MARC), ('S', 'C')]},
+                     {'a': {'S.A', 'S.C'}, 'b': {'S.A', 'S.C'}},
+                     listado='S.A | r\nambiente | sin corpus grabado | no se bajo el corpus\n'))
         eq_lista = parsear_lista(
             'Running main() from gtest_main.cc\nS.\n  A\n  B\nInst/P.\n  T/0  # GetParam() = 1\n  T/1  # GetParam() = 2\n'
             'Ty/0.  # TypeParam = int\n  U\nTy/1.  # TypeParam = float\n  U\n')
         caso('R3 el parser de --gtest_list_tests: suites, parametrizadas y typed', False,
              [] if eq_lista == {'S.A', 'S.B', 'Inst/P.T/0', 'Inst/P.T/1', 'Ty/0.U', 'Ty/1.U'} else [repr(sorted(eq_lista))])
 
-        def lista_con(nombre, salidas, include_extra=''):
+        def lista_con(nombre, salidas, include_extra='', xml_dir='auto'):
             base = os.path.join(tmp, nombre)
             for t, out in salidas.items():
                 exe = os.path.join(base, t, t + '.exe')
+                xd = '%s/gtest-xml/%s' % (base.replace(os.sep, '/'), t) if xml_dir == 'auto' else xml_dir
                 _w(base, '%s/%s[1]_include.cmake' % (t, t),
                    'gtest_discover_tests_impl(\n  TEST_EXECUTABLE [==[%s]==]\n  TEST_WORKING_DIR [==[%s]==]\n'
-                   '  TEST_EXTRA_ARGS [==[]==]\n  TEST_FILTER [==[%s]==]\n)\n' % (exe.replace(os.sep, '/'), os.path.dirname(exe).replace(os.sep, '/'), include_extra))
+                   '  TEST_EXTRA_ARGS [==[]==]\n  TEST_FILTER [==[%s]==]\n  TEST_XML_OUTPUT_DIR [==[%s]==]\n)\n'
+                   % (exe.replace(os.sep, '/'), os.path.dirname(exe).replace(os.sep, '/'), include_extra, xd))
             return base
 
         def ejecutor(salidas):
@@ -1255,6 +1318,12 @@ def self_test():
         b = lista_con('lista_filtro', {'t': ''}, include_extra='-S.*')
         regs, errs = registrados_de(b, ejecutor({'t': 'S.\n  A\n'}))
         caso('R3 gtest_discover_tests con TEST_FILTER no vacio -> rojo', True, errs)
+        b = lista_con('lista_sin_xmldir', {'t': ''}, xml_dir='')
+        regs, errs = registrados_de(b, ejecutor({'t': 'S.\n  A\n'}))
+        caso('R3 un *_include.cmake sin TEST_XML_OUTPUT_DIR -> rojo', True, [e for e in errs if 'TEST_XML_OUTPUT_DIR' in e])
+        b = lista_con('lista_xmldir_ajeno', {'t': ''}, xml_dir='/x/gtest-xml/otro')
+        regs, errs = registrados_de(b, ejecutor({'t': 'S.\n  A\n'}))
+        caso('R3 un TEST_XML_OUTPUT_DIR que no termina en el target -> rojo', True, errs)
         base = os.path.join(tmp, 'lista_vacia'); os.makedirs(base)
         caso('R3 un build sin ningun *_include.cmake -> rojo', True, registrados_de(base, ejecutor({}))[1])
 

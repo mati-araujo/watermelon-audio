@@ -293,21 +293,23 @@ def main(argv):
     jobs = os.cpu_count() or 4
     print(f"windows-cross: {gxx} (GCC {got}), {BUILD_TYPE}, -Werror, build en {build_root}", flush=True)
     return gate(argv, build_root, prefix, java_home, jobs,
-                registro=lambda win_dir, win_by_out: registro_gate(build_root, prefix, win_dir, win_by_out, jobs))
+                registro=lambda win_dir, win_by_out, fallan: registro_gate(build_root, prefix, win_dir, win_by_out, jobs,
+                                                               fallan=fallan))
 
 
 def gate(argv, build_root, prefix, java_home, jobs, runner=run, baseline_path=BASELINE, registro=None):
-    """Compila los dos CMakes y da el veredicto contra el baseline: el exit code. `registro(win_dir, win_by_out)`:
-    el diff de registro de AC-061.1 (`registro_gate`), que corre si la suite de Windows compila entera."""
+    """Compila los dos CMakes y da el veredicto contra el baseline: el exit code. `registro(win_dir, win_by_out,
+    fallan)`: el diff de registro de AC-061.1 (`registro_gate`); `fallan` son las fuentes de la suite de Windows que no
+    compilan (en el baseline o no): sus objetos no existen y se excluyen de los dos lados."""
     update = "--update-baseline" in argv
     known, failed, outputs = set(), set(), {}
-    win_tests, tests_fallan = None, False
+    win_tests, fallan_tests = None, set()
     for name, src in (("desktop", os.path.join(CPP, "desktop")), ("tests", os.path.join(CPP, "tests"))):
         srcs, fl, log, detail, by_out = build_objects(name, src, os.path.join(build_root, name), prefix, java_home,
                                                       jobs, runner)
         print(f"  {name}: {len(srcs)} objetos, {len(fl)} fallan", flush=True)
         if name == "tests":
-            win_tests, tests_fallan = (os.path.join(build_root, name), by_out), bool(fl)
+            win_tests, fallan_tests = (os.path.join(build_root, name), by_out), set(fl)
         known |= srcs
         failed |= fl
         for src_file, text in detail.items():
@@ -328,10 +330,8 @@ def gate(argv, build_root, prefix, java_home, jobs, runner=run, baseline_path=BA
     nuevas, sobrantes = verdict(failed, baseline, known)
 
     rc_reg = 0
-    if registro is not None and not tests_fallan:
-        rc_reg = registro(*win_tests)
-    elif registro is not None:
-        print("  diff de registro: SALTEADO (la suite de Windows no compila entera: no hay objetos que comparar)")
+    if registro is not None:
+        rc_reg = registro(*win_tests, fallan_tests)
     if not nuevas and not sobrantes and rc_reg:
         print("windows-cross: ROJO — el baseline de fuentes esta bien, pero el diff de registro (arriba) no")
         return rc_reg
@@ -372,6 +372,10 @@ def gate(argv, build_root, prefix, java_home, jobs, runner=run, baseline_path=BA
 
 NM_LINE = re.compile(r"^[0-9a-fA-F]+\s+[A-Za-z]\s+(\S+)")
 TESTBODY_RE = re.compile(r"(?<![\w])(\w+_Test)(?:<.*>)?::TestBody\(\)")
+# TYPED_TEST_P(S, N) no define `S_N_Test`: es `namespace gtest_suite_S_ { template <T> class N }`. El nombre se arma
+# juntando, NO partiendo por `_` (gtest no prohibe `_` en los nombres de verdad: con `Suite_With_Underscores` no hay
+# forma de partir); `(\w+?)_::` ata el ultimo `_` antes de `::` y es inequivoco.
+TESTBODY_P_RE = re.compile(r"(?<![\w])gtest_suite_(\w+?)_::(\w+)(?:<.*>)?::TestBody\(\)")
 OBJ_TARGET_RE = re.compile(r"CMakeFiles/([^/]+)\.dir/")
 
 
@@ -394,8 +398,17 @@ def simbolos_testbody(nm_out):
     return out
 
 
+def clase_de_demangled(line):
+    """La clase (`Suite_Test_Test`) de un simbolo demangled `...::TestBody()`, o None."""
+    m = TESTBODY_RE.search(line)
+    if m:
+        return m.group(1)
+    m = TESTBODY_P_RE.search(line)
+    return f"{m.group(1)}_{m.group(2)}_Test" if m else None
+
+
 def clases_de_demangled(lines):
-    return {m.group(1) for l in lines for m in [TESTBODY_RE.search(l)] if m}
+    return {c for c in map(clase_de_demangled, lines) if c}
 
 
 def targets_de_test(build_dir):
@@ -541,7 +554,22 @@ def cargar_wnr():
     return mod
 
 
-def registro_gate(build_root, prefix, win_dir, win_by_out, jobs, runner=run):
+def sin_fallados(by_output, fallan):
+    """(by_output sin los objetos cuya fuente fallo, [fuentes excluidas que estaban]). Una fuente que no compila en
+    Windows no deja objeto: sus clases no se cuentan en NINGUN lado (se quitan tambien del lado POSIX)."""
+    if not fallan:
+        return by_output, []
+    return ({o: src for o, src in by_output.items() if src not in fallan},
+            sorted({src for src in by_output.values() if src in fallan}))
+
+
+def targets_sin_objetos(by_output, targets, fallan):
+    """Los targets de test cuyos objetos fallaron TODOS: no linkean, no queda nada que comparar."""
+    return sorted(t for t, objs in objetos_por_target(by_output, targets).items()
+                  if objs and all(src in fallan for _, src in objs))
+
+
+def registro_gate(build_root, prefix, win_dir, win_by_out, jobs, runner=run, fallan=frozenset()):
     """El diff de registro completo: compila la suite POSIX con el compilador del host, lee las dos con nm, compara.
     Devuelve el exit code (0 verde)."""
     wnr = cargar_wnr()
@@ -551,6 +579,15 @@ def registro_gate(build_root, prefix, win_dir, win_by_out, jobs, runner=run):
     t_win = targets_de_test(win_dir)
     if not t_win:
         raise Fatal(f"no encuentro ningun `*[1]_include.cmake` en {win_dir}: no se que targets registran tests")
+    muertos = targets_sin_objetos(win_by_out, t_win, fallan)
+    for t in muertos:
+        print(f"  ROJO — {t}: ningun objeto de Windows compila: el target no linkea y no hay registro que comparar")
+    win_by_out, excluidas = sin_fallados(win_by_out, fallan)
+    if excluidas:
+        print(f"  registro: {len(excluidas)} fuente(s) NO compilan para Windows (baseline): sus clases no se cuentan en "
+              f"ningun lado y el diff se hace sin ellas:")
+        for e in excluidas:
+            print(f"    - {e}")
     posix_dir = os.path.join(build_root, "tests-posix")
     cxx = shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")
     if not cxx:
@@ -595,9 +632,11 @@ def registro_gate(build_root, prefix, win_dir, win_by_out, jobs, runner=run):
     filt_posix = find_tool(["c++filt", "llvm-cxxfilt"])
     # los objetos de Windows son TODOS los de la suite: se ordena por target de test
     win = clases_por_target(win_dir, win_by_out, t_win, nm_win, filt_win, runner)
-    posix = clases_por_target(posix_dir, by_out, set(cfg_targets), nm_posix, filt_posix, runner)
+    by_out_cmp, _ = sin_fallados(by_out, fallan)
+    posix = clases_por_target(posix_dir, by_out_cmp, set(cfg_targets), nm_posix, filt_posix, runner)
     posix = {t: v for t, v in posix.items() if t in cfg_targets}
-    win = {t: v for t, v in win.items() if t in t_win}
+    win = {t: v for t, v in win.items() if t in t_win and t not in muertos}
+    posix = {t: v for t, v in posix.items() if t not in muertos}
     errores, notas, resumen = diff_registro(
         posix, win, lst.hallazgos["posix-solo"], lst["solo-windows"], nombres_de_fuentes())
     print("  diff de registro (clases `<Suite>_<Test>_Test::TestBody` por target):")
@@ -607,6 +646,8 @@ def registro_gate(build_root, prefix, win_dir, win_by_out, jobs, runner=run):
     print(f"    declarado: {n_decl} `posix-solo`, {len(lst['solo-windows'])} `solo-windows`")
     for n in notas:
         print(f"    nota: {n}")
+    if muertos:
+        errores.append("target(s) de test sin ningun objeto de Windows que compile: " + ", ".join(muertos))
     if errores:
         print(f"\nROJO — el diff de registro Windows/POSIX (AC-061.1) no coincide con lo declarado en "
               f"audio/src/main/cpp/tests/windows-not-run.txt:")
@@ -679,6 +720,29 @@ def red_paths_cases():
         rc, txt = code(fake(ninja_rc=1, ninja_out="FAILED: [code=1] a.obj\ng++ -c a\na.cpp:1:1: error: boom\n"))
         if rc != 1 or "ROJO" not in txt:
             bad.append(f"objeto que falla fuera del baseline tenia que dar 1 (dio {rc})")
+
+        # una fuente de tests que falla Y esta en el baseline: el diff de registro corre igual (sin SALTEADO), con ella excluida
+        base2 = os.path.join(tmp, "baseline2.txt")
+        with open(base2, "w", encoding="utf-8") as fh:
+            fh.write("a.cpp" + chr(10))
+        llamadas = []
+
+        def con_registro(rc_reg):
+            def reg(win_dir, win_by_out, fallan):
+                llamadas.append(set(fallan))
+                return rc_reg
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = guarded(gate, [], os.path.join(tmp, "b2"), "p-", "/jh", 1,
+                             fake(ninja_rc=1, ninja_out="FAILED: [code=1] a.obj" + chr(10) + "g++ -c a" + chr(10) + "a.cpp:1:1: error: boom" + chr(10)),
+                             base2, reg)
+            return rc, out.getvalue() + err.getvalue()
+        rc, txt = con_registro(0)
+        if rc != 0 or not llamadas or llamadas[-1] != {"a.cpp"} or "SALTEADO" in txt:
+            bad.append(f"fuente de tests caida en el baseline: el registro tenia que correr con fallan={{a.cpp}} (rc={rc}, {llamadas}, {txt!r})")
+        rc, txt = con_registro(1)
+        if rc != 1:
+            bad.append(f"fuente de tests caida en el baseline y registro rojo: tenia que dar 1 (dio {rc})")
     return bad
 
 
@@ -726,6 +790,32 @@ def registro_cases():
                                "C_D_Test<int>::TestBody()", "testing::Test::TestBody()", "Foo::bar()"])
     if got != {"A_B_Test", "G_H_Test", "C_D_Test"}:
         bad.append(f"registro: demangled: {got}")
+    # TYPED_TEST_P, y nombres con `_` (no se parte por `_`: se junta)
+    got = clases_de_demangled(["gtest_suite_Ty_::Name<int>::TestBody()", "gtest_suite_Ty_::Name<std::vector<int> >::TestBody()",
+                               "gtest_suite_Suite_With_Underscores_::Test_Name<float>::TestBody()",
+                               "Suite_With_Underscores_Test_Name_Test::TestBody()", "(anonymous namespace)::gtest_suite_Q_::Z<int>::TestBody()",
+                               "gtest_suite_Ty_::Name<int>::Other()"])
+    if got != {"Ty_Name_Test", "Suite_With_Underscores_Test_Name_Test", "Q_Z_Test"}:
+        bad.append(f"registro: demangled TYPED_TEST_P / guiones bajos: {got}")
+    if clase_de("Suite_With_Underscores.Test_Name") != "Suite_With_Underscores_Test_Name_Test":
+        bad.append("registro: clase_de con guiones bajos")
+    # nm simulado de punta a punta: un objeto con TYPED_TEST_P y un TEST normal
+    by_out_p = {"t/CMakeFiles/t.dir/a.cpp.obj": "x/a.cpp"}
+    fake_p = lambda cmd, log=None, **kw: types.SimpleNamespace(returncode=0, stdout="0 T _Z1\n0 W _Z2 TestBody\n0 T _Z3 TestBody\n")
+    dem_p = {"_Z2": "gtest_suite_Ty_::Name<int>::TestBody()", "_Z3": "A_B_Test::TestBody()"}
+    got = clases_por_target("/b", by_out_p, {"t"}, "nm", "filt", fake_p, lambda f, syms: [dem_p[x] for x in syms])
+    if got != {"t": {"Ty_Name_Test": {"a.cpp"}, "A_B_Test": {"a.cpp"}}}:
+        bad.append(f"registro: clases_por_target con TYPED_TEST_P: {got}")
+    # fuentes que fallan: sus objetos salen de los dos lados; un target sin ningun objeto vivo es rojo
+    by_o = {"t/CMakeFiles/t.dir/a.cpp.obj": "x/a.cpp", "t/CMakeFiles/t.dir/b.cpp.obj": "x/b.cpp",
+            "u/CMakeFiles/u.dir/c.cpp.obj": "x/c.cpp"}
+    resto, ex = sin_fallados(by_o, {"x/b.cpp", "x/c.cpp"})
+    if sorted(resto.values()) != ["x/a.cpp"] or ex != ["x/b.cpp", "x/c.cpp"]:
+        bad.append(f"registro: sin_fallados: {resto} {ex}")
+    if targets_sin_objetos(by_o, {"t", "u"}, {"x/b.cpp", "x/c.cpp"}) != ["u"]:
+        bad.append("registro: un target con TODOS los objetos caidos tenia que dar rojo (y t, con uno vivo, no)")
+    if targets_sin_objetos(by_o, {"t", "u"}, set()) != []:
+        bad.append("registro: sin fuentes caidas ningun target esta muerto")
     with tempfile.TemporaryDirectory() as tmp:
         for f in ("core_tests[1]_include.cmake", "x_tests[1]_tests.cmake"):
             open(os.path.join(tmp, f), "w").close()
