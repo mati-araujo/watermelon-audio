@@ -4,10 +4,22 @@
     watermelon_audio.dll con sus exports/imports, y su carga desde una JVM.
 
 .DESCRIPTION
-    No atesta (.github/local-gate.json lo escribe gate.sh y nadie mas), no escribe en el arbol, no
-    baja ni ejecuta nada de la red. Los build dirs de la DLL y del launcher JVM viven en -WorkDir
-    (fuera del repo). La suite usa scripts/run-cpp-tests.ps1, que construye en
-    audio/src/main/cpp/tests/build (ignorado por git).
+    No atesta (.github/local-gate.json lo escribe gate.sh y nadie mas) y no baja ni ejecuta nada de la
+    red: la suite corre con run-cpp-tests.ps1 -Offline (configure desconectado) y, si falta googletest
+    en audio/src/main/cpp/tests/.deps, el paso suite falla ANTES de configurar diciendo como prepararlo.
+
+    QUE ESCRIBE Y DONDE
+      en el repo   SOLO los build dirs de la suite, declarados en $AllowedIgnoredWrites
+                   (audio/src/main/cpp/tests/build, ignorado por git). Cualquier otra cosa es rojo.
+      fuera        -WorkDir: build de la DLL (dll\), launcher JVM (jvm\), fotos del paso repo (snap\).
+
+    El paso repo compara el arbol antes y despues:
+      (a) lo versionado y lo no ignorado, POR CONTENIDO: `git status --porcelain=v1 --untracked-files=all`,
+          el hash de `git diff HEAD --binary` y el hash de cada untracked no ignorado. Identico o rojo.
+      (b) los paths ignorados NUEVOS (`git status --porcelain --ignored`, lineas `!!`): rojo y nombrados,
+          salvo los declarados en $AllowedIgnoredWrites. Una escritura dentro de un dir ignorado que ya
+          existia no se ve.
+    -SelfTest prueba ese chequeo con mutantes sobre un repo descartable en -WorkDir (no toca este arbol).
 
     Pasos, en orden:
       pin     el GCC de MSYS2 UCRT64 es el fijado en .github/toolchain-pins.json (AC-061.6)
@@ -15,7 +27,7 @@
       suite   scripts/run-cpp-tests.ps1 (ctest con timeout por test + check-windows-not-run.py --results)
       dll     build Release de audio/src/main/cpp/desktop; check-jni-symbols.py --pe y --imports
       jvm     System.loadLibrary + nativeIsEngineInitialized() == false desde una JVM (AC-061.5)
-      repo    `git status --porcelain --ignored` al final == al principio
+      repo    el arbol al final == al principio (ver arriba)
 
     Antes de lanzar cualquier hijo, SetErrorMode(FAILCRITICALERRORS | NOGPFAULTERRORBOX |
     NOOPENFILEERRORBOX): se hereda a los hijos y un crash/abort() de un test vuelve solo, sin dialogo
@@ -25,7 +37,11 @@
     Corre un solo paso (pin, lint, suite, dll, jvm, repo) para iterar. NO cuenta como corrida completa.
 
 .PARAMETER SkipJvm
-    Salta el paso jvm, y lo dice en el resumen.
+    Salta el paso jvm. La corrida es PARCIAL (como -Only): el loadLibrary de AC-061.5 no se verifico y el
+    resumen y la linea final lo dicen.
+
+.PARAMETER SelfTest
+    Prueba el chequeo del paso repo con mutantes en un repo descartable bajo -WorkDir y sale.
 
 .PARAMETER WorkDir
     Donde van el build de la DLL y el launcher JVM. Default: %LOCALAPPDATA%\Temp\wma-gate-windows.
@@ -39,6 +55,7 @@ param(
     [ValidateSet('pin', 'lint', 'suite', 'dll', 'jvm', 'repo')]
     [string]$Only,
     [switch]$SkipJvm,
+    [switch]$SelfTest,
     [string]$WorkDir = (Join-Path $env:LOCALAPPDATA 'Temp\wma-gate-windows'),
     [int]$TestTimeoutSec = 180
 )
@@ -106,11 +123,113 @@ function Get-Jdk {
     throw "No encuentro un JDK con include\jni.h y bin\javac.exe (JAVA_HOME='$($env:JAVA_HOME)', C:\Program Files\Java\jdk-*)."
 }
 
-function Get-RepoState {
-    $s = & git -C $RepoRoot status --porcelain --ignored
-    if ($LASTEXITCODE -ne 0) { throw "git status fallo (rc=$LASTEXITCODE)" }
-    if ($s) { return ,[string[]]@($s) }
-    return ,[string[]]@()
+# Unico permiso de escritura en el repo: los build dirs ignorados de la suite (relativos a la raiz, con /).
+$AllowedIgnoredWrites = @('audio/src/main/cpp/tests/build')
+
+function Invoke-Git {
+    param([Parameter(Mandatory)][string]$Root, [string[]]$GitArgs)
+    $out = & git -C $Root @GitArgs
+    if ($LASTEXITCODE -ne 0) { throw "git $($GitArgs -join ' ') fallo (rc=$LASTEXITCODE)" }
+    $out
+}
+
+function Get-TreeSnapshot {
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Scratch)
+    New-Item -ItemType Directory -Force -Path $Scratch | Out-Null
+    $status = @(Invoke-Git $Root @('status', '--porcelain=v1', '--untracked-files=all'))
+    $diffFile = Join-Path $Scratch 'tree.diff'
+    Invoke-Git $Root @('diff', 'HEAD', '--binary', "--output=$diffFile") | Out-Null
+    $diffHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $diffFile).Hash
+    Remove-Item -Force $diffFile
+    $untracked = New-Object System.Collections.ArrayList
+    $raw = (& git -C $Root ls-files --others --exclude-standard -z | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw "git ls-files fallo (rc=$LASTEXITCODE)" }
+    foreach ($f in @(($raw -split "`0") | ForEach-Object { $_.Trim("`r", "`n") } | Where-Object { $_ })) {
+        $h = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Root $f)).Hash
+        [void]$untracked.Add("$h  $f")
+    }
+    $ignored = @(Invoke-Git $Root @('status', '--porcelain', '--ignored') |
+        Where-Object { $_ -like '!! *' } | ForEach-Object { $_.Substring(3).Trim('"').TrimEnd('/') })
+    [pscustomobject]@{ Status = $status; DiffHash = $diffHash; Untracked = @($untracked); Ignored = $ignored }
+}
+
+# Los problemas entre dos fotos (vacio == identico salvo lo permitido).
+function Compare-TreeSnapshot {
+    param($Before, $After, [string[]]$Allowed)
+    $problems = New-Object System.Collections.ArrayList
+    foreach ($d in @(Compare-Object -ReferenceObject @($Before.Status) -DifferenceObject @($After.Status))) {
+        [void]$problems.Add("git status: $($d.SideIndicator) $($d.InputObject)")
+    }
+    if ($Before.DiffHash -ne $After.DiffHash) {
+        [void]$problems.Add("git diff HEAD --binary cambio de contenido (sha256 $($Before.DiffHash) -> $($After.DiffHash))")
+    }
+    foreach ($d in @(Compare-Object -ReferenceObject @($Before.Untracked) -DifferenceObject @($After.Untracked))) {
+        [void]$problems.Add("untracked: $($d.SideIndicator) $($d.InputObject)")
+    }
+    foreach ($p in @($After.Ignored | Where-Object { @($Before.Ignored) -notcontains $_ })) {
+        $ok = $false
+        foreach ($a in $Allowed) { if ($p -eq $a -or $p.StartsWith("$a/")) { $ok = $true } }
+        if (-not $ok) { [void]$problems.Add("ignorado NUEVO no declarado: $p") }
+    }
+    $problems.ToArray()
+}
+
+function Invoke-RepoSelfTest {
+    $root = Join-Path $WorkDir 'selftest-repo'
+    $scratch = Join-Path $WorkDir 'selftest-scratch'
+    if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    foreach ($g in @(@('init', '-q'), @('config', 'user.email', 'selftest@example.invalid'),
+                     @('config', 'user.name', 'selftest'), @('config', 'core.autocrlf', 'false'))) {
+        Invoke-Git $root $g | Out-Null
+    }
+    Set-Content -Path (Join-Path $root '.gitignore') -Value "build/`nout/" -Encoding ASCII
+    Set-Content -Path (Join-Path $root 'tracked.txt') -Value 'a' -Encoding ASCII
+    New-Item -ItemType Directory -Force -Path (Join-Path $root 'sub') | Out-Null
+    Invoke-Git $root @('add', '-A') | Out-Null
+    Invoke-Git $root @('commit', '-q', '-m', 'base') | Out-Null
+    # Estado inicial "sucio": un versionado ya modificado y un untracked.
+    $dirty = {
+        Invoke-Git $root @('checkout', '-q', '--', 'tracked.txt') | Out-Null
+        Add-Content -Path (Join-Path $root 'tracked.txt') -Value 'dirty'
+        Set-Content -Path (Join-Path $root 'untracked.txt') -Value 'u' -Encoding ASCII
+        foreach ($rm in 'build', 'out', 'sub\nuevo.txt') {
+            $pth = Join-Path $root $rm
+            if (Test-Path $pth) { Remove-Item -Recurse -Force $pth }
+        }
+    }
+    & $dirty
+    $allowed = @('build')
+    $fail = New-Object System.Collections.ArrayList
+    $cases = @(
+        @{ Name = 'sin cambios'; Want = $false; Do = { } },
+        @{ Name = 'build dir declarado, nuevo'; Want = $false; Do = {
+            New-Item -ItemType Directory -Force -Path (Join-Path $root 'build') | Out-Null
+            Set-Content -Path (Join-Path $root 'build\x.o') -Value 'x' } },
+        @{ Name = 'versionado ya modificado, mas contenido'; Want = $true; Do = {
+            Add-Content -Path (Join-Path $root 'tracked.txt') -Value 'mas' } },
+        @{ Name = 'untracked con otro contenido'; Want = $true; Do = {
+            Set-Content -Path (Join-Path $root 'untracked.txt') -Value 'otro' -Encoding ASCII } },
+        @{ Name = 'untracked nuevo'; Want = $true; Do = {
+            Set-Content -Path (Join-Path $root 'sub\nuevo.txt') -Value 'n' -Encoding ASCII } },
+        @{ Name = 'ignorado nuevo no declarado'; Want = $true; Do = {
+            New-Item -ItemType Directory -Force -Path (Join-Path $root 'out') | Out-Null
+            Set-Content -Path (Join-Path $root 'out\y') -Value 'y' } }
+    )
+    foreach ($c in $cases) {
+        $before = Get-TreeSnapshot $root $scratch
+        & $c.Do
+        $after = Get-TreeSnapshot $root $scratch
+        $probs = @(Compare-TreeSnapshot $before $after $allowed)
+        $red = $probs.Count -gt 0
+        $mark = 'ok   '
+        if ($red -ne $c.Want) { $mark = 'FALLA'; [void]$fail.Add($c.Name) }
+        Write-Host ("  {0} {1,-42} rojo={2}  {3}" -f $mark, $c.Name, $red, ($probs -join ' | '))
+        & $dirty
+    }
+    Remove-Item -Recurse -Force $root, $scratch -ErrorAction SilentlyContinue
+    if ($fail.Count) { throw "self-test del chequeo del repo: fallaron $($fail -join ', ')" }
+    Write-Host "self-test del chequeo del repo: ok"
 }
 
 $DllDir = Join-Path $WorkDir 'dll'
@@ -153,7 +272,7 @@ $stepSuite = {
     $null = Get-Tc
     $ps = Join-Path $PSHOME 'powershell.exe'
     Invoke-Native $ps @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-        (Join-Path $PSScriptRoot 'run-cpp-tests.ps1'), '-TimeoutSec', $TestTimeoutSec)
+        (Join-Path $PSScriptRoot 'run-cpp-tests.ps1'), '-Offline', '-TimeoutSec', $TestTimeoutSec)
 }
 
 $stepDll = {
@@ -165,6 +284,7 @@ $stepDll = {
     $fwd = { param($p) $p -replace '\\', '/' }
     Invoke-Native $tc.Cmake @('-S', $src, '-B', $DllDir, '-G', 'Ninja',
         '-DCMAKE_BUILD_TYPE=Release',
+        '-DWMA_DESKTOP_WERROR=ON',
         "-DCMAKE_MAKE_PROGRAM=$(& $fwd $tc.Ninja)",
         "-DCMAKE_CXX_COMPILER=$(& $fwd $tc.Gxx)",
         "-DWMA_JAVA_HOME=$(& $fwd $jdk)")
@@ -225,9 +345,13 @@ public class Launcher {
 
 # ---- corrida -----------------------------------------------------------------------
 Write-Host "gate-windows: $(Get-Date -Format 's')  repo=$RepoRoot  work=$WorkDir"
+if ($SelfTest) { Invoke-RepoSelfTest; exit 0 }
 if ($Only) { Write-Host "-Only $Only : PARCIAL, no cuenta como corrida completa." }
+if ($SkipJvm) { Write-Host "-SkipJvm : PARCIAL, no cuenta como corrida completa; el loadLibrary (AC-061.5) NO se verifica." }
+$partial = [bool]$Only -or $SkipJvm
 
-$stateBefore = Get-RepoState
+$snapDir = Join-Path $WorkDir 'snap'
+$stateBefore = Get-TreeSnapshot $RepoRoot $snapDir
 $plan = @(
     @{ Name = 'pin';   Body = $stepPin },
     @{ Name = 'lint';  Body = $stepLint },
@@ -251,13 +375,13 @@ foreach ($step in $plan) {
 # El arbol, siempre (tambien tras un rojo: lo que un paso ensucio se nombra igual).
 if (-not $Only -or $Only -eq 'repo') {
     $okRepo = Invoke-Step 'repo' {
-        $after = Get-RepoState
-        $diff = Compare-Object -ReferenceObject @($stateBefore) -DifferenceObject @($after)
-        if ($diff) {
-            $diff | ForEach-Object { Write-Host ("  {0} {1}" -f $_.SideIndicator, $_.InputObject) }
-            throw "El gate cambio el arbol (git status --porcelain --ignored): '=>' es nuevo, '<=' desaparecio."
+        $after = Get-TreeSnapshot $RepoRoot $snapDir
+        $problems = @(Compare-TreeSnapshot $stateBefore $after $AllowedIgnoredWrites)
+        if ($problems.Count) {
+            $problems | ForEach-Object { Write-Host "  $_" }
+            throw "El gate cambio el arbol ('=>' nuevo, '<=' desaparecio); solo se permite escribir en: $($AllowedIgnoredWrites -join ', ')."
         }
-        Write-Host "git status --porcelain --ignored: identico al del inicio."
+        Write-Host "arbol identico por contenido al del inicio (permitido escribir: $($AllowedIgnoredWrites -join ', '))."
     }
     if (-not $okRepo) { $ok = $false }
 }
@@ -266,6 +390,8 @@ Write-Host ""
 Write-Host "---- resumen ----"
 foreach ($r in $results) { Write-Host ("{0,-6} {1,6:N0}s  rc={2}" -f $r.Name, $r.Secs, $r.Rc) }
 if ($Only) { Write-Host "(parcial: -Only $Only)" }
+if ($SkipJvm) { Write-Host "(parcial: -SkipJvm, el loadLibrary de AC-061.5 NO se verifico)" }
+if ($ok -and $partial) { Write-Host "gate-windows: VERDE PARCIAL (no cuenta como corrida completa)" ; exit 0 }
 if ($ok) { Write-Host "gate-windows: VERDE" ; exit 0 }
 Write-Host "gate-windows: ROJO"
 exit 1

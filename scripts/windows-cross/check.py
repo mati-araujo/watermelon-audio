@@ -58,6 +58,8 @@ JNI_MD_WIN32 = """\
 #define JNIEXPORT __declspec(dllexport)
 #define JNIIMPORT __declspec(dllimport)
 #define JNICALL
+/* El jni_md.h de Windows define JNICALL como __stdcall, que en x64 no decora: vacio es equivalente.
+   Se deja vacio porque el jni.h del JDK de Linux del contenedor choca con la redefinicion. */
 typedef long jint;
 typedef long long jlong;
 typedef signed char jbyte;

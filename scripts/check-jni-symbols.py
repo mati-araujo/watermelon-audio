@@ -26,10 +26,15 @@ LA DLL DE WINDOWS (REQ-061 AC-061.5)
 `watermelon_audio.dll` (MinGW UCRT64, `-static`) tiene dos chequeos propios, los dos
 sobre `objdump -p` y los dos con la misma regla de arriba (no pudo leer = FALLO):
 
-  * `--pe DLL`: los exports de la tabla de nombres son EXACTAMENTE las `external fun`
-    del bridge menos lo que `WMA_JNI_USB=0` recorta (las regiones `#if WMA_JNI_USB`
-    de `jni_audio_bridge.cpp` y los archivos `jni_usb.cpp` / `jni_benchmark.cpp`, que
-    desktop no compila), mas `JNI_OnLoad`/`JNI_OnUnload`. Falla en las DOS
+  * `--pe DLL`: los exports de la tabla de nombres son EXACTAMENTE (REQ-061 D12):
+    `external fun` del bridge
+      - las regiones `#if WMA_JNI_USB` de `jni_audio_bridge.cpp`
+      - `jni_usb.cpp`
+      - `jni_benchmark.cpp` (benchmark de Oboe, solo Android)
+      + `JNI_OnLoad`/`JNI_OnUnload`.
+    Sin stubs. La resta es POR ARCHIVO: se leen los `Java_` de esos fuentes, no una
+    lista de nombres, asi que un JNIEXPORT nuevo en otro archivo sigue exigiendo su
+    export. Falla en las DOS
     direcciones: falta uno, o sobra uno (un `wma_*` de la C API, un simbolo de
     libstdc++). Un export decorado (`_nombre`, `nombre@N`) es rojo y se nombra: no se
     normaliza en silencio. Se mide la tabla que escribio el linker, asi que un
@@ -442,6 +447,11 @@ def pe_self_test(check, levanta) -> None:  # noqa: ANN001
     got = expected_pe_exports(kt, cpp, [JNI_PREFIX + "nativeBench("])
     check("PE fuentes: esperado = external fun - USB - archivos fuera de desktop + OnLoad/OnUnload",
           got == {JNI_PREFIX + "nativeAlpha", "JNI_OnLoad", "JNI_OnUnload"}, str(got))
+    kt_new = kt + "external fun nativeNuevo()\n"
+    exp_new = expected_pe_exports(kt_new, cpp, [JNI_PREFIX + "nativeBench("])
+    e = check_pe_exports(sorted(exp_new - {JNI_PREFIX + "nativeNuevo"}), exp_new)
+    check("PE fuentes: un Java_ nuevo en un archivo de desktop (ni usb ni benchmark) sin export -> rojo",
+          e == [f"falta el export {JNI_PREFIX}nativeNuevo"], str(e))
     check("PE fuentes: nada que recortar NO es un pase (regex muerto)",
           levanta(lambda: expected_pe_exports(kt, "int x;", [])))
     real = expected_pe_exports(BRIDGE_KT.read_text(encoding="utf-8"),

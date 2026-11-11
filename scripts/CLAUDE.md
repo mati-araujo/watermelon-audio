@@ -87,7 +87,10 @@ camino critico de un PR atestado (`local_first.md` §2).
   TYPED_TEST_P (`gtest_suite_<S>_::<N><T>::TestBody()`) se mapea a `S_N_Test`; los nombres se JUNTAN, nunca se parten por
   `_` (el arbol tiene tests con `_` y ninguna suite con `_`; `Suite_With_Underscores` esta en el self-test). En la Mac no se pudo medir desde la PC Windows: ahi el diff usa `nm` + `c++filt` de Xcode.
 - `gate-windows.ps1` (REQ-061): el gate LOCAL de la PC Windows (MSYS2 UCRT64), PowerShell 5.1; no atesta, no baja nada y
-  no escribe en el árbol (compara `git status --porcelain --ignored` antes y después). Pasos: `pin` (el GCC es el de
+  no escribe en el árbol: compara por CONTENIDO antes y después (`git status --porcelain=v1 --untracked-files=all`, hash de
+  `git diff HEAD --binary` y de cada untracked); las escrituras ignoradas permitidas se declaran
+  (`audio/src/main/cpp/tests/build`). Tiene `-SelfTest`. Su límite: una escritura dentro de un dir ignorado preexistente no
+  se ve. `run-cpp-tests.ps1 -Offline`: configura sin red y falla con mensaje si faltan las deps (el gate lo usa). Pasos: `pin` (el GCC es el de
   `toolchain-pins.json`, lógica compartida en `windows-toolchain.ps1` con `run-cpp-tests.ps1`), `lint`, `suite`
   (`run-cpp-tests.ps1 -TimeoutSec 180`: ctest con timeout por test), `dll` (build Release en `%LOCALAPPDATA%\Temp\wma-gate-windows`,
   `--pe`/`--imports`), `jvm` (`System.loadLibrary` + `nativeIsEngineInitialized()==false` con PATH reducido; `-SkipJvm` lo
@@ -97,7 +100,8 @@ camino critico de un PR atestado (`local_first.md` §2).
   sostiene: si el parser abarca menos prototipos de los que hay en el arbol, FALLA. Sin baseline:
   nacio en cero desajustes. Las tres preguntas: `audio/src/main/cpp/jni/CLAUDE.md`.
 - `check-jni-symbols.py` (MINI-001): sólo NOMBRES contra el `.so`. REQ-061: `--pe DLL` exige exports == `external fun` menos
-  USB (el `.def`/`--export-all-symbols` no existen: salen sólo los `JNIEXPORT`) e `--imports DLL` exige que la DLL importe
+  USB y menos el benchmark de Oboe (REQ-061 D12: regiones `#if WMA_JNI_USB`, `jni_usb.cpp`, `jni_benchmark.cpp`, restados
+  por archivo; más `JNI_OnLoad`/`JNI_OnUnload`, sin stubs) (el `.def`/`--export-all-symbols` no existen: salen sólo los `JNIEXPORT`) e `--imports DLL` exige que la DLL importe
   sólo `KERNEL32.dll` y `api-ms-win-crt-*` (un runtime que no viaja dentro, como `libwinpthread-1.dll`, es rojo). Ambos leen
   `objdump -p` (`--objdump X` o `$OBJDUMP`).
 - La ruta del bridge Kotlin que leen `check-jni-symbols`, `check-jni-signatures` y

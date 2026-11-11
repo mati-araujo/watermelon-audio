@@ -33,6 +33,14 @@
     ctest --timeout: seconds per test before ctest kills it and reports it failed (0 = ctest's default).
     scripts/gate-windows.ps1 passes 180, like the sanitizer runs in CLAUDE.md.
 
+.PARAMETER Offline
+    Configure disconnected from the network (FETCHCONTENT_FULLY_DISCONNECTED=ON): googletest must already be in
+    the deps dir, and if it is not the script stops BEFORE configuring with how to prepare it. scripts/gate-windows.ps1
+    passes it (the gate downloads nothing). Run the script once without it to populate .deps.
+
+.PARAMETER DepsDir
+    Where FetchContent keeps googletest (default: audio/src/main/cpp/tests/.deps, ignored by git).
+
 .PARAMETER Fast
     Skip Stress/Slow tests. Like -Filter it runs fewer tests, so the not-run
     check tolerates listed tests that do not show up (--partial).
@@ -48,7 +56,9 @@ param(
     [switch]$Clean,
     [switch]$Fast,
     [int]$Jobs = 0,
-    [int]$TimeoutSec = 0
+    [int]$TimeoutSec = 0,
+    [switch]$Offline,
+    [string]$DepsDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,7 +70,7 @@ if ($Jobs -le 0) { $Jobs = 4 }
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'audio\src\main\cpp\tests'
 $BuildDir = Join-Path $SrcDir 'build'
-$DepsDir  = Join-Path $SrcDir '.deps'
+if (-not $DepsDir) { $DepsDir = Join-Path $SrcDir '.deps' }
 
 # cmake, ninja and the pinned MSYS2 UCRT64 g++ (root + GCC version from .github/toolchain-pins.json,
 # the single source; scripts/check-dep-pins.py enforces it). Shared with scripts/gate-windows.ps1.
@@ -73,6 +83,12 @@ $mingwBin = $tc.MingwBin
 # UCRT64 exes need their runtime DLLs (libstdc++-6, libgcc_s_seh-1,
 # libwinpthread-1) on PATH when ctest launches them.
 $env:PATH = "$mingwBin;$(Split-Path -Parent $ninjaBin);$env:PATH"
+
+if ($Offline -and -not (Test-Path (Join-Path $DepsDir 'googletest-src\CMakeLists.txt'))) {
+    Write-Host "run-cpp-tests: -Offline y falta googletest en $DepsDir."
+    Write-Host "  Preparalo una vez FUERA del gate (baja googletest de GitHub): corre scripts/run-cpp-tests.ps1 sin -Offline (una corrida de la suite basta)"
+    exit 2
+}
 
 Write-Host "cmake   : $cmakeBin"
 Write-Host "ninja   : $ninjaBin"
@@ -94,7 +110,9 @@ $ninjaBin, $gxx, $gcc, $DepsDir = @($ninjaBin, $gxx, $gcc, $DepsDir) | ForEach-O
 # results scripts/check-windows-not-run.py reads (AC-061.1). Set at configure time because ctest bakes it
 # into the per-test command line.
 $ResultsDir = Join-Path $BuildDir 'gtest-xml'
-& $cmakeBin -S $SrcDir -B $BuildDir -G Ninja `
+# Explicito en los dos sentidos: la variable queda en el CMakeCache y un -Offline previo no puede pegarse a una corrida manual.
+$offlineArgs = @("-DFETCHCONTENT_FULLY_DISCONNECTED=$(if ($Offline) { 'ON' } else { 'OFF' })")
+& $cmakeBin -S $SrcDir -B $BuildDir -G Ninja @offlineArgs `
     -DWMA_GTEST_XML_DIR="$($ResultsDir -replace '\\', '/')" `
     -DCMAKE_BUILD_TYPE=Debug `
     -DCMAKE_MAKE_PROGRAM="$ninjaBin" `
