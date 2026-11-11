@@ -97,8 +97,24 @@ if ($Offline) {
     $pinMatch = [regex]::Match((Get-Content -Raw -LiteralPath $pinFile), '(?m)^\s*GIT_TAG\s+([0-9a-f]{40})\b')
     if (-not $pinMatch.Success) { throw "No encuentro el GIT_TAG (SHA de 40 hex) en $pinFile." }
     $wantSha = $pinMatch.Groups[1].Value
-    $gotSha = (& git -C (Join-Path $DepsDir 'googletest-src') rev-parse HEAD 2>$null)
-    if ($LASTEXITCODE -ne 0 -or -not $gotSha) { $gotSha = '(no es un checkout git)' }
+    # googletest-src tiene que ser la raiz de SU checkout: si no, git sube al repo padre y reporta su HEAD.
+    # `Continue` local: con 'Stop', PS 5.1 vuelve terminante el stderr de un exe (NativeCommandError).
+    $gtSrc = (Join-Path $DepsDir 'googletest-src')
+    $gotSha = ''
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $top = (& git -C $gtSrc rev-parse --show-toplevel 2>&1 | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | Select-Object -First 1)
+        $topRc = $LASTEXITCODE
+        if ($topRc -eq 0 -and $top) {
+            $norm = { param($p) ([IO.Path]::GetFullPath("$p").TrimEnd([char]92, [char]47) -replace '/', '\') }
+            if ((& $norm $top) -ieq (& $norm $gtSrc)) {
+                $gotSha = (& git -C $gtSrc rev-parse HEAD 2>&1 | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | Select-Object -First 1)
+                if ($LASTEXITCODE -ne 0) { $gotSha = '' }
+            }
+        }
+    } finally { $ErrorActionPreference = $prevEap }
+    if (-not $gotSha) { $gotSha = '(no es un checkout git propio)' }
     $gotSha = "$gotSha".Trim()
     if ($gotSha -ne $wantSha) {
         Write-Host "run-cpp-tests: -Offline y el googletest instalado en $DepsDir no es el fijado."

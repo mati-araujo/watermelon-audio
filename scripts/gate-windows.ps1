@@ -9,9 +9,11 @@
     en audio/src/main/cpp/tests/.deps, el paso suite falla ANTES de configurar diciendo como prepararlo.
 
     QUE ESCRIBE Y DONDE
-      en el repo   SOLO los build dirs de la suite, declarados en $AllowedIgnoredWrites
-                   (audio/src/main/cpp/tests/build y audio/src/main/cpp/tests/.deps/googletest-build,
-                   ignorados por git; el resto de .deps es lectura). Cualquier otra cosa es rojo.
+      en el repo   la suite escribe en audio/src/main/cpp/tests/build y en
+                   audio/src/main/cpp/tests/.deps/googletest-build (ambos ignorados por git). El chequeo
+                   declara en $AllowedIgnoredWrites sólo tests/build: `.deps` está ignorado entero y
+                   preexiste bajo -Offline, así que git lo colapsa en UNA entrada y lo que pase dentro de
+                   él (googletest-build incluido) NO lo ve el chequeo. Cualquier otra cosa nueva es rojo.
       fuera        -WorkDir: build de la DLL (dll\), launcher JVM (jvm\), fotos del paso repo (snap\).
 
     El paso repo compara el arbol antes y despues:
@@ -124,8 +126,9 @@ function Get-Jdk {
     throw "No encuentro un JDK con include\jni.h y bin\javac.exe (JAVA_HOME='$($env:JAVA_HOME)', C:\Program Files\Java\jdk-*)."
 }
 
-# Unico permiso de escritura en el repo: los build dirs ignorados de la suite (relativos a la raiz, con /).
-$AllowedIgnoredWrites = @('audio/src/main/cpp/tests/build', 'audio/src/main/cpp/tests/.deps/googletest-build')
+# Unico permiso de escritura en el repo: el build dir ignorado de la suite (relativo a la raiz, con /).
+# `.deps` no va: preexiste ignorado y git lo colapsa en una entrada, un permiso para su interior nunca aplicaria.
+$AllowedIgnoredWrites = @('audio/src/main/cpp/tests/build')
 
 function Invoke-Git {
     param([Parameter(Mandatory)][string]$Root, [string[]]$GitArgs)

@@ -88,8 +88,7 @@ camino critico de un PR atestado (`local_first.md` §2).
   `_` (el arbol tiene tests con `_` y ninguna suite con `_`; `Suite_With_Underscores` esta en el self-test). En la Mac no se pudo medir desde la PC Windows: ahi el diff usa `nm` + `c++filt` de Xcode.
 - `gate-windows.ps1` (REQ-061): el gate LOCAL de la PC Windows (MSYS2 UCRT64), PowerShell 5.1; no atesta, no baja nada y
   no escribe en el árbol: compara por CONTENIDO antes y después (`git status --porcelain=v1 --untracked-files=all`, hash de
-  `git diff HEAD --binary` y de cada untracked); las escrituras ignoradas permitidas se declaran
-  (`audio/src/main/cpp/tests/build` y `.../tests/.deps/googletest-build`, no todo `.deps`). Los untracked se leen como UTF-8 (PS 5.1 usa OEM: un `diseño.md` rompía el snapshot). Tiene `-SelfTest`. Su límite: una escritura dentro de un dir ignorado preexistente no
+  `git diff HEAD --binary` y de cada untracked); la suite escribe en `audio/src/main/cpp/tests/build` (declarado) y en `.../tests/.deps/googletest-build` (no declarable: `.deps` está ignorado entero y preexiste, así que el chequeo no ve lo de adentro). Los untracked se leen como UTF-8 (PS 5.1 usa OEM: un `diseño.md` rompía el snapshot). Tiene `-SelfTest`. Su límite: una escritura dentro de un dir ignorado preexistente no
   se ve. `run-cpp-tests.ps1 -Offline`: configura sin red y sale 2 con mensaje si falta googletest o si su `HEAD` no es el SHA de `thirdparty/googletest.cmake` (se lee de ahí; un bump correría en verde contra el checkout viejo); se actualiza FUERA del gate, sin `-Offline`. Pasos: `pin` (el GCC es el de
   `toolchain-pins.json`, lógica compartida en `windows-toolchain.ps1` con `run-cpp-tests.ps1`), `lint`, `suite`
   (`run-cpp-tests.ps1 -Offline -TimeoutSec 180`: ctest con timeout por test), `dll` (build Release en `%LOCALAPPDATA%\Temp\wma-gate-windows`,
