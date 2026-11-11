@@ -229,8 +229,18 @@ jobs:
       # 0/10— porque un `sleep_for(120ms)` es tiempo ABSOLUTO y ahogar la maquina
       # no achica esa ventana. Lo que reproduce es COLAPSARLA: 10/10 en 2 segundos.
       # ---------------------------------------------------------------------
+      # MINI-057. En el PR re-corre SOLO los tests que la corrida de arriba trazo
+      # (`$BUILD/wait-trace/`, que deja el mismo run-cpp-tests.sh de este job, sobre
+      # el mismo arbol); sin traza valida corre todo y lo dice. En `push: master`
+      # corre la suite ENTERA: la traza es el atajo del PR, no la red (invariante
+      # D4 en el encabezado del script).
       - name: Ningun test depende del reloj de pared — REQ-002
-        run: bash scripts/check-time-dependence.sh
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            bash scripts/check-time-dependence.sh --full
+          else
+            bash scripts/check-time-dependence.sh
+          fi
 
       - name: Toda espera cruda en un test esta clasificada — self-test
         run: python3 scripts/check-test-waits.py --self-test
