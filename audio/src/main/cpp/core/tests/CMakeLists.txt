@@ -238,6 +238,27 @@ target_link_libraries(core_tests PRIVATE
     Threads::Threads
 )
 
+# MINI-057 D17: el test de costo pareado de la compuerta de envios (SoundFontEffectsSendEngine.
+# TheUnitsCostLessThanTheVoicesAndTheGateAFractionOfThat) compara lambdas cuyo costo relativo
+# depende del optimizador, y a -O1 cambia de veredicto: AppleClang -O1 daba la compuerta a 3,45x
+# contra su techo de 1,5x (run 42928259678); con sólo la TU a -O0 las unidades daban ~5,1x contra
+# 3,0 porque se mezclan niveles (run 42950016735); GCC 15.2 -O1 dio la compuerta a 3,66x en un
+# intento y pasó en otros (run 42971401043, a1). La premisa escrita del test es que sus dos lados
+# compilan sin vectorizar, y eso vive en lo que ejecutan las lambdas, no sólo en la TU.
+# Lista NOMBRADA, en todas las plataformas, el resto de core_tests sigue a WMA_TESTS_OPT:
+#   - la TU del test: compuerta (ambos barridos), reverb/chorus de envios (SoundFontReverb.h y
+#     SoundFontChorus.h son inline, se compilan ahi) y el armado de las voces;
+#   - thirdparty/tinysoundfont/tsf_impl.cpp: tsf_render_float_sends, las "voces" del par.
+# El -O0 de la fuente va ULTIMO en la linea de compilacion, despues del -O1 de WMA_TESTS_OPT.
+# tsf_impl.cpp pertenece al target `tinysoundfont`, que en el grafo de host sólo linkea
+# core_tests (y sf_render_preset, EXCLUDE_FROM_ALL), por eso el alcance real es el de core_tests.
+# La propiedad de fuente es del directorio que define el target, de ahi el DIRECTORY.
+get_target_property(WMA_TSF_TARGET_DIR tinysoundfont SOURCE_DIR)
+set_source_files_properties(${WMA_CPP_ROOT}/thirdparty/tinysoundfont/tsf_impl.cpp
+    DIRECTORY ${WMA_TSF_TARGET_DIR} PROPERTIES COMPILE_OPTIONS -O0)
+set_source_files_properties(test_soundfont_effects_send.cpp
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTIES COMPILE_OPTIONS -O0)
+
 include(GoogleTest)
 gtest_discover_tests(core_tests)
 
