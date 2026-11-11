@@ -3043,13 +3043,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     // Sizing the Java array to the ACTUAL count stays here too — same family as
     // the waveform clamp: what knows about Java array lengths lives up top.
     if (maxOnsets <= 0) return env->NewIntArray(0);
-    std::vector<jint> onsets(static_cast<size_t>(maxOnsets), 0);
-    static_assert(sizeof(jint) == sizeof(int), "onset buffer is reinterpreted as int*");
-    const int n = wma_looper_detect_onsets(g_wmaEngine, trackIndex,
-                                          reinterpret_cast<int*>(onsets.data()),
+    std::vector<int> onsets(static_cast<size_t>(maxOnsets), 0);
+    const int n = wma_looper_detect_onsets(g_wmaEngine, trackIndex, onsets.data(),
                                           maxOnsets, hopFrames, sensitivity);
     jintArray result = env->NewIntArray(n);
-    if (result && n > 0) env->SetIntArrayRegion(result, 0, n, onsets.data());
+    if (result && n > 0) {
+        const std::vector<jint> converted(onsets.begin(), onsets.begin() + n);
+        env->SetIntArrayRegion(result, 0, n, converted.data());
+    }
     return result;
 }
 
@@ -3069,8 +3070,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDetect
     }
     const jsize capacity = env->GetArrayLength(out);
     if (capacity <= 0) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
-    static_assert(sizeof(jint) == sizeof(int), "onset buffer is reinterpreted as int*");
-    std::vector<jint> onsets;
+    std::vector<int> onsets;
     try {
         onsets.assign(static_cast<size_t>(capacity), 0);
     } catch (...) {
@@ -3083,10 +3083,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDetect
         env->ExceptionClear();
         return static_cast<jint>(WMA_ERROR_MEMORY);
     }
-    const int n = wma_detect_onsets(samples, frames, sampleRate, reinterpret_cast<int*>(onsets.data()),
+    const int n = wma_detect_onsets(samples, frames, sampleRate, onsets.data(),
                                     capacity, hopFrames, sensitivity);
     env->ReleaseFloatArrayElements(stereo, samples, JNI_ABORT);
-    if (n > 0) env->SetIntArrayRegion(out, 0, n, onsets.data());
+    if (n > 0) {
+        const std::vector<jint> converted(onsets.begin(), onsets.begin() + n);
+        env->SetIntArrayRegion(out, 0, n, converted.data());
+    }
     return static_cast<jint>(n);
 }
 
@@ -3100,7 +3103,6 @@ JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperAnalyzePitch(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat hopMs, jintArray outFrames,
     jfloatArray outHz, jfloatArray outConfidence, jintArray outHopFrames) {
-    static_assert(sizeof(jint) == sizeof(int), "frame buffer is reinterpreted as int*");
     int hopFrames = 0;
     jint written = 0;
     if (outFrames == nullptr || outHz == nullptr || outConfidence == nullptr) {
@@ -3117,9 +3119,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         const int maxPoints = std::min({static_cast<int>(frames.size()),
                                         static_cast<int>(hz.size()),
                                         static_cast<int>(confidence.size())});
+        std::vector<int> frameBuf(static_cast<size_t>(std::max(maxPoints, 0)), 0);
         written = wma_looper_analyze_pitch(g_wmaEngine, trackIndex, hopMs,
-                                           reinterpret_cast<int*>(frames.get()), hz.get(),
+                                           frameBuf.data(), hz.get(),
                                            confidence.get(), maxPoints, &hopFrames);
+        const size_t copied = std::min(frameBuf.size(), static_cast<size_t>(std::max<jint>(written, 0)));
+        std::copy(frameBuf.begin(), frameBuf.begin() + copied, frames.get());
     }
     if (outHopFrames != nullptr) {
         ScopedIntArrayRW hop(env, outHopFrames);
