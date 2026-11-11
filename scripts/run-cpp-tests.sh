@@ -66,4 +66,54 @@ cmake --build "$BUILD_DIR" -j"$JOBS"
 #
 # CTEST_JOBS lo baja quien lo necesite —un runner con poca RAM bajo TSan, o
 # depurar un flake— y un `-j` en "$@" tambien gana, porque va despues.
-ctest --test-dir "$BUILD_DIR" --output-on-failure -j "${CTEST_JOBS:-$JOBS}" "$@"
+#
+# LA TRAZA DE ESPERAS CIEGAS (MINI-057). Este script es su DUENO: `sleepFixed` deja un
+# archivo vacio por test que la llama en $BUILD_DIR/wait-trace/ (TestWait.h), y
+# `check-time-dependence.sh` re-corre solo esos. Un directorio viejo no puede colarse:
+# se VACIA antes de ctest, y el MANIFEST se escribe despues y solo si la traza es de
+# una corrida COMPLETA:
+#   - sin filtro: un -R/-E/-L/-I (o cualquier otra forma de elegir tests) deja tests
+#     sin correr, y sus esperas faltan de la traza;
+#   - con ctest en verde (rc 0): un test que aborta porque no pudo escribir la traza
+#     (AC-057.4) no deja su archivo, asi que una suite roja tiene la traza incompleta.
+TRACE_DIR="$BUILD_DIR/wait-trace"
+rm -rf "$TRACE_DIR"
+mkdir -p "$TRACE_DIR"
+
+filtered=0
+for arg in "$@"; do
+    case "$arg" in
+        -R*|-E*|-L*|-I*|-F*|-N*|-U*|--tests-*|--exclude-*|--label-*|--rerun-failed|--fixture-*|--show-only*|--stop-on-failure) filtered=1 ;;
+    esac
+done
+
+# Sello del arbol: tree-id de HEAD + cambios + archivos nuevos no ignorados, via un
+# indice temporal (no toca el real). Cambia si cambia cualquier fuente. IDENTICA a la
+# de check-time-dependence.sh; si divergen, el SHA no coincide y el detector corre todo.
+tree_stamp() {
+    local d idx
+    d="$(mktemp -d)" || return 0
+    idx="$d/index"
+    ( cd "$REPO_ROOT" && export GIT_INDEX_FILE="$idx" \
+        && git read-tree HEAD >/dev/null 2>&1 \
+        && git add -A . >/dev/null 2>&1 \
+        && git write-tree 2>/dev/null ) || true
+    rm -rf "$d"
+}
+
+rc=0
+WMA_TEST_WAIT_TRACE="$TRACE_DIR" \
+    ctest --test-dir "$BUILD_DIR" --output-on-failure -j "${CTEST_JOBS:-$JOBS}" "$@" || rc=$?
+
+if [[ $rc -eq 0 && $filtered -eq 0 ]]; then
+    stamp="$(tree_stamp)"
+    if [[ -n "$stamp" ]]; then
+        total="$(ctest --test-dir "$BUILD_DIR" -N | sed -n 's/^Total Tests: //p')"
+        traced="$(find "$TRACE_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+        printf 'tree=%s\ntests=%s\ntraced=%s\n' "$stamp" "$total" "$traced" >"$TRACE_DIR/MANIFEST.tmp"
+        mv "$TRACE_DIR/MANIFEST.tmp" "$TRACE_DIR/MANIFEST"
+    else
+        echo "wait-trace: no pude sellar el arbol con git; sin MANIFEST (el detector correra todo)" >&2
+    fi
+fi
+exit "$rc"

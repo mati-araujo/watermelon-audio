@@ -42,8 +42,11 @@
  * y su propia perilla — no colgado de esta.
  */
 
+#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <thread>
@@ -73,6 +76,58 @@ inline double waitScale() {
 }
 
 /**
+ * Codifica `Suite.Test` de gtest como nombre de archivo, de forma REVERSIBLE:
+ * pasan solo [A-Za-z0-9._-]; todo lo demás (`/` de los TEST_P, `%`, `<`, espacios)
+ * va como `%XX`. El detector (`check-time-dependence.sh`) lo decodifica y compara
+ * contra el `--gtest_filter=` del comando de ctest.
+ */
+inline std::string traceFileName(const std::string& testName) {
+    static const char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    for (const unsigned char c : testName) {
+        const bool plain = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                           (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (plain) {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += kHex[c >> 4];
+            out += kHex[c & 0xF];
+        }
+    }
+    return out;
+}
+
+/**
+ * Traza de las esperas ciegas (MINI-057). Con `WMA_TEST_WAIT_TRACE=<dir>`, deja un
+ * archivo VACIO por test que llego a `sleepFixed`, nombrado con `Suite.Test`: es
+ * la lista de los unicos tests que `WMA_TEST_WAIT_SCALE=0` puede cambiar de
+ * veredicto (hasta su primera llamada un test ejecuta lo mismo a cualquier escala).
+ *
+ * ABORTA, no registra y sigue: una traza que se pierde en silencio hace que el
+ * detector re-corra de menos, y eso da verde por ceguera. Sin test en curso (un
+ * `SetUpTestSuite`, un thread huerfano) tampoco hay nombre que dejar.
+ */
+inline void traceBlindWait() {
+    const char* dir = std::getenv("WMA_TEST_WAIT_TRACE");
+    if (dir == nullptr || *dir == '\0') return;
+
+    const ::testing::TestInfo* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    if (info == nullptr) {
+        std::fputs("WMA_TEST_WAIT_TRACE: sleepFixed sin test en curso; la traza quedaria ciega\n",
+                   stderr);
+        std::abort();
+    }
+    const std::string name = std::string(info->test_suite_name()) + "." + info->name();
+    const std::string path = std::string(dir) + "/" + traceFileName(name);
+    std::FILE* f = std::fopen(path.c_str(), "ab");  // "a": crea si falta, nunca trunca
+    if (f == nullptr || std::fclose(f) != 0) {
+        std::fprintf(stderr, "WMA_TEST_WAIT_TRACE: no pude escribir %s\n", path.c_str());
+        std::abort();
+    }
+}
+
+/**
  * Espera ciega, escalada. **La forma debil, y esta ahi para poder medirla.**
  *
  * Usala solo donde no hay condicion observable que esperar — por ejemplo para
@@ -80,6 +135,7 @@ inline double waitScale() {
  * algo que se puede consultar, va `waitUntil` y no esto.
  */
 inline void sleepFixed(std::chrono::milliseconds d) {
+    traceBlindWait();
     const auto scaled = std::chrono::duration_cast<std::chrono::nanoseconds>(d * waitScale());
     if (scaled.count() <= 0) return;
     std::this_thread::sleep_for(scaled);
