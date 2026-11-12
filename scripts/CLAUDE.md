@@ -26,13 +26,40 @@ camino critico de un PR atestado (`local_first.md` §2).
   jitter, intervalo, forzar un orden; `// WAIT-OK: razon`) · `presencia` (espera y afirma →
   `wma_test::waitUntil`) · `ausencia` (espera a que NO pase → `wma_test::sleepFixed`).
   🔴 Si es PRESENCIA, agrandar el sleep NO lo arregla: alcanza aca y se queda corto en el runner.
-- `check-time-dependence.sh`: corre la suite con las esperas CIEGAS colapsadas y dice que test
-  cambia de veredicto. Lo corre el job `cpp-tests` de ubuntu, no `gate.sh` (cuesta una corrida).
+- `check-time-dependence.sh`: corre la suite con las esperas CIEGAS colapsadas (`WMA_TEST_WAIT_SCALE=0`)
+  y dice que test cambia de veredicto. Lo corre el job `cpp-tests` de ubuntu, no `gate.sh`.
   🔴 NO carga la maquina a proposito: esta MEDIDO que la contencion no reproduce esta clase (40
   quemadores sobre 10 nucleos: 0/10; `taskpolicy -c background` + carga: 1/10, y fue timeout; un
   `sleep_for(120ms)` es tiempo absoluto y el render lento le da MAS margen). Colapsar la
   espera: 10/10 en 2 s. Cubre UNA clase; no ve una espera POR CONDICION que se vuelve
   inalcanzable ni las esperas de AUSENCIA (falso VERDE). El script lo imprime.
+  **Que re-corre (MINI-057).** Hasta su primera llamada a `sleepFixed` un test hace lo mismo a
+  escala 1 que a 0, asi que sólo los que LLEGARON a `sleepFixed` pueden cambiar de veredicto. Con
+  `WMA_TEST_WAIT_TRACE=<dir>`, `sleepFixed` deja un archivo vacio por test (nombre gtest con
+  percent-encoding, `tests/support/TestWait.h`) y ABORTA si no puede escribirlo o no hay test en
+  curso: una traza perdida en silencio da verde por ceguera.
+  - `run-cpp-tests.sh` es el DUENO de `$BUILD/wait-trace/`: la vacia antes del build, sella el
+    arbol (tree-id con indice temporal) antes del build y lo re-sella tras ctest, y escribe el
+    `MANIFEST` (`tree`, `tests`, `traced`) sólo si ctest dio rc 0, no hubo filtros (`-R -E -L -I
+    -F -N -U ...` en `"$@"`) y los dos sellos coinciden.
+  - El detector, por defecto, exige el MANIFEST con el sello actual y la cuenta de trazas igual a
+    la del directorio. Lee `ctest --show-only=json-v1`, mapea cada test de ctest por el
+    `--gtest_filter=` de su comando (el nombre que registra ctest es otro: pretty, sin
+    `DISABLED_`, `#GetParam()=…`) y elige por NUMERO con `-I`. Un nombre puede ser VARIOS tests
+    de ctest (el mismo `.cpp` en dos binarios): se corren todos y la afirmacion es «corridos ==
+    numeros elegidos»; imprime ambas cantidades. `-j` como `run-cpp-tests.sh` (`CTEST_JOBS`, si no
+    `nproc`, si no `sysctl -n hw.ncpu`, si no 4).
+  - FALLA CERRADO: sin MANIFEST, de otro arbol, con la cuenta rota, un nombre que ctest no
+    registra, numeracion de `ctest -N` que no cuadra con json-v1 o sin `python3`, corre la suite
+    ENTERA y dice el motivo. `--full` fuerza eso (push a master).
+  - exit 3 = traza CIEGA (MANIFEST valido pero sin el probe positivo en la traza: no cae a la
+    suite entera, taparia justo eso), ctest sin resumen legible, o corridos != elegidos. El
+    self-test corre SIN la variable, asi que el probe de la traza no es una tautologia.
+  - 🔴 **INVARIANTE (D4):** HOY las llamadas a `sleepFixed` son incondicionales en su camino. Un
+    `sleepFixed` detras de una condicion que a escala 1 no se cumple escapa a la traza en el PR;
+    lo cubre sólo el barrido completo de master. Quien lo agregue asi rompe el atajo a sabiendas.
+  - Windows (D22): `run-cpp-tests.ps1` NO exporta `WMA_TEST_WAIT_TRACE` ni escribe MANIFEST (el detector no corre alli),
+    asi que `sleepFixed` no escribe nada; el MINI es dueno de que la suite compile limpia con `-O1` bajo MinGW (`windows-cross`); la suite de Windows corre a `-O0` (D29), asi que ese `-O1` es sólo de compilacion.
 - `check-cpp-portability.sh` (WA-0.4, REQ-061 AC-061.7): regla 1, `jni.h` / `android/` fuera de su capa; regla 2, una API
   sólo-POSIX o sólo-Windows fuera de su capa (`platform/`, el backend de su plataforma, `usb/`, `jni/`), por header Y por
   SÍMBOLO suelto medido (`lstat`, `link(`, `O_NOFOLLOW`...: viven en headers que MinGW sí tiene, así que un lint de headers no

@@ -354,6 +354,68 @@ Dos consecuencias que conviene tener escritas:
    es **bajar `CTEST_JOBS`**, nunca subir el techo: el presupuesto que importa es el de los
    sanitizers.
 
+> Los tiempos de §7.13 son de la suite de 883 tests a `-O0`. Hoy son 2238 y todo compila a `-O1`
+> salvo TSan (D6), Windows (D29) y macOS (D23) (§7.14); no los uses como presupuesto.
+
+### 7.14 Suite a -O1 y detector por traza (MINI-057)
+
+Con los tres jobs de ubuntu como camino crítico entero (§2), el más lento —`cpp-tests`— llegó a
+1621 s contra un `timeout-minutes: 30`. Dos costos daban cuenta de la mayor parte y ninguno
+protegía nada:
+
+1. `check-time-dependence.sh` re-corría las 2238 pruebas **en serie** (≈ 1000 s), aunque sólo las
+   que llaman a `wma_test::sleepFixed` pueden cambiar de veredicto.
+2. La suite de host compilaba a **`-O0`**, y los tests que miden DSP pagan entre 4 y 12 veces lo
+   que cuestan optimizados.
+
+Qué cambió: el detector lee una **traza** que deja `sleepFixed` y re-corre en paralelo sólo esos
+tests (en `push: master` corre la suite entera, y también sin traza válida); la suite compila a
+`-O1 -g` con asserts vivos. Mismos tests, mismos sanitizers, mismo detector; no se sacó un chequeo.
+Cómo funciona y su invariante: `scripts/CLAUDE.md`. Las excepciones al `-O1` (TSan, D6; Windows, D29, y macOS, D23, quedan a `-O0`, idénticos a master: Windows porque su suite no se puede verificar desde la PC de desarrollo, macOS por `SongMix`) y por
+qué: `audio/src/main/cpp/CLAUDE.md`.
+
+**Medición base** (run 42848245291, PR `stage/REQ-055.3-espiga-mac`, a `-O0`):
+
+| job | total | build | ctest | otro |
+|---|---|---|---|---|
+| `cpp-tests` | 1621 s | 220 s | 379 s | detector ≈ **1000 s** |
+| `cpp-tests-tsan` | 1368 s | 200 s | 1151 s | |
+| `cpp-tests-asan` | 1159 s | 315 s | 826 s | |
+
+**Primera medición a `-O1`** (run 42928259678, rama descartable, `-Wno-error` sólo ahí, detector
+todavía en serie, TSan todavía a `-O1`; 2238 tests):
+
+| job | total | build | ctest | detector (serie) | ctest |
+|---|---|---|---|---|---|
+| `cpp-tests` | 738 s | ≈226 s | 129 s | 357 s | 2238/2238 |
+| `cpp-tests-asan` | 769 s | ≈458 s | 303 s | — | 2238/2238 |
+| `cpp-tests-tsan` | 692 s | ≈237 s | 447 s | — | 2238/2238 |
+| `cpp-tests-macos` | 402 s | ≈214 s | 167 s | — | 1 rojo de 2238 |
+
+El rojo de macOS (costo pareado de la compuerta, 3,45x contra techo 1,5x) no cedió dejando esa TU
+a `-O0` (la compuerta pasó, pero falló el otro techo: unidades 5,05x–5,18x contra 3,0, run 42950016735; el test necesita un nivel uniforme en todo el grafo): la suite de macOS (Apple clang) quedó a `-O0` (D15; aislar el test en `core_cost_tests`, D20, sacó ese motivo, pero macOS sigue a `-O0` por otro, D23: ver la tabla final). La fila de TSan ya no describe el estado final: TSan quedó a `-O0` (D6), así que su
+tiempo vuelve a subir. Tampoco alcanzó en ubuntu: con GCC 15.2 a `-O1` la compuerta dio 3,66x contra 1,5x en un intento (run 42971401043), así que el test pasó a su propio ejecutable, `core_cost_tests`, todo a `-O0` en todas las plataformas, y `core_tests` sigue a `-O1` (D20). Un `-O0` por archivo dentro de `core_tests` (D17) no alcanzó: reverb y chorus son `inline`, otras TUs a `-O1` emiten su copia COMDAT y el link se queda con la primera (unidades/tsf 0,32x–0,39x contra ~1,08x en master). El build sale unas 2,7 veces más caro (38 s → 103 s en `analysis_tests` +
+`effects_tests`, 12 núcleos) y el ctest baja a la mitad o menos; los timeouts no se tocaron.
+
+**Medición final, emparejada** (D31: 5 pares lanzados a la vez; MINI = run 43206186559 sobre
+926af5a, base = run 43023912835 sobre d581137; segundos, MINI/base por par). Un job «sube» si el
+MINI tarda más en ≥ 4 de 5 pares: ninguno sube.
+<!-- MINI-057: 5 pares emparejados, D31 -->
+| job | pares MINI/base (s) | MINI > base | mediana MINI / base |
+|---|---|---|---|
+| `cpp-tests` | 327/1618, 459/1007, 313/1331, 434/1643, 482/1353 | 0/5 | 434 / 1353 |
+| `cpp-tests-asan` | 679/644, 929/1114, 620/663, 988/1244, 940/1148 | 1/5 | 929 / 1114 |
+| `cpp-tests-tsan` | 1474/1738, 1568/1200, 1569/1274, 1564/1576, 1593/1578 | 3/5 | 1568 / 1576 |
+| `cpp-tests-macos` (medido a `-O1`, antes de volver a `-O0` por D23) | 403/554, 333/494, 405/560, 415/503, 462/581 | 0/5 | 405 / 554 |
+
+En macOS la base del par 2 salió roja (`SongApi.AC_055_13`, previo) y el MINI del par 5 también:
+`SongMix.ABurstOfMixSettersAgainstTheCallbackAllocatesNothingAndStaysInsideThePeriod` dio 10 902 875 ns contra
+un periodo de 5 333 333 ns a `-O1`. Por eso macOS vuelve a `-O0` (D23) y esa fila es de `-O1`, no del estado final.
+El detector de reloj en `cpp-tests` pasó de 628–996 s a 2 s.
+
+> Lo que NO se mueve: `OfflineAnalysis.*` y `SignOutsideRange.*` (~30 s) avanzan en lock-step
+> contra el `AnalysisThread` real y están atados al reloj, no a la CPU; `-O1` no los toca.
+
 ### 7.8 El gate local: qué corre y qué no
 
 `gate.sh` corre exactamente lo que el CI va a saltear, más los dos guardrails que cuestan
@@ -596,3 +658,6 @@ después: local 379 s (6,3 min, antes de pushear)  +  CI = los 3 de ubuntu en pa
 simulador iPhone 17 / iOS 26.4 ya booteado, árbol ya construido (pasada incremental, que es el
 caso real al preparar un PR). Los dos runs de sanitizer son la excepción: `run-cpp-tests.sh`
 hace `rm -rf` de `build-san`, así que **siempre** reconstruyen desde cero.
+
+> Las filas de ASan+UBSan y TSan son anteriores a MINI-057: se midieron a `-O0`. ASan+UBSan compila
+> hoy a `-O1`; TSan sigue a `-O0` (D6), y Windows (D29) y macOS (D23) también (§7.14).
