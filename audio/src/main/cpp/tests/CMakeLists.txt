@@ -107,15 +107,21 @@ endif()
 # check-windows-not-run --results) y techos de tiempo de pared que nadie midio en Windows. El
 # ahorro de tiempo en Windows no es objetivo del MINI. WIN32 vale con el toolchain cruzado
 # (CMAKE_SYSTEM_NAME Windows, windows-cross) y con el configure nativo de run-cpp-tests.ps1 en MSYS2.
+# Excepcion declarada (MINI-057 D23): Apple clang (macOS) tambien compila a -O0, identico a master.
+# A -O1 cambia el veredicto de SongMix.ABurstOfMixSettersAgainstTheCallbackAllocatesNothingAndStaysInsideThePeriod:
+# run final 43206186559, intento 5, job 131204207295 (`Host tests: optimization = -O1`):
+# `Expected: (static_cast<double>(costs.back())) < (kPeriodNs), actual: 10902875 vs 5333333.333333333`
+# (un callback tardo mas que su periodo). En master (macOS -O0) esa asercion del maximo no se
+# evalua (va bajo __OPTIMIZE__), asi que a -O1 es un veredicto nuevo sin evidencia previa (D21).
 # Este es el punto unico: lo heredan todos los configures (sh, ps1, CI, gate.sh).
 # WMA_TESTS_OPT vacio = automatico; un valor explicito siempre manda.
 set(WMA_TESTS_OPT "" CACHE STRING
-    "Optimization flag for the host test suite; empty = auto (-O1; -O0 under TSan and on Windows)")
+    "Optimization flag for the host test suite; empty = auto (-O1; -O0 under TSan, on Windows and on Apple clang)")
 if(WMA_TESTS_OPT)
     set(WMA_TESTS_OPT_EFFECTIVE "${WMA_TESTS_OPT}")
 elseif(WMA_TESTS_SANITIZE MATCHES "thread")
     set(WMA_TESTS_OPT_EFFECTIVE "-O0")
-elseif(WIN32)
+elseif(WIN32 OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     set(WMA_TESTS_OPT_EFFECTIVE "-O0")
 else()
     set(WMA_TESTS_OPT_EFFECTIVE "-O1")
