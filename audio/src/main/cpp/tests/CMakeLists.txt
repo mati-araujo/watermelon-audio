@@ -99,22 +99,13 @@ endif()
 # GCC 15.2.0, 5 corridas): a -O1 GCC expande en linea el memcpy del payload del anillo SPSC
 # y esos accesos no llegan a TSan; una carrera sembrada en LockFreeRingBuffer da 0/5 a -O1
 # y 5/5 a -O0. ASan y UBSan sí ven sus mutaciones 5/5 a -O1 y se quedan en -O1.
-# Excepcion declarada (MINI-057 D15): Apple clang (la suite de macOS) compila a -O0. El test de
-# costo pareado de la compuerta de envios (SoundFontEffectsSendEngine.
-# TheUnitsCostLessThanTheVoicesAndTheGateAFractionOfThat) necesita un nivel de optimizacion
-# uniforme en todo el grafo. Todo a -O1 (AppleClang 21, run 42928259678): la compuerta da 3,45x
-# contra su techo de 1,5x. Sólo la TU del test a -O0 (run 42950016735): la compuerta pasa, pero las
-# unidades dan 5,05x–5,18x contra 3,0, porque el inline del header (reverb/chorus) queda a -O0 y tsf a
-# -O1. Con todo a -O0 ambos lados compilan igual; macOS no es el cuello de botella. La fragilidad
-# del test es un hallazgo para otro objetivo. Se decide por el ID del compilador y no
-# por APPLE: lo medido es Apple clang, y un clang de Homebrew ("Clang") o GCC en macOS no lo es.
 # Un solo lugar que heredan el job cpp-tests-macos del CI y gate.sh (via run-cpp-tests.sh).
 # WMA_TESTS_OPT vacio = automatico; un valor explicito siempre manda.
 set(WMA_TESTS_OPT "" CACHE STRING
-    "Optimization flag for the host test suite; empty = auto (-O1; -O0 under TSan and Apple clang)")
+    "Optimization flag for the host test suite; empty = auto (-O1; -O0 under TSan)")
 if(WMA_TESTS_OPT)
     set(WMA_TESTS_OPT_EFFECTIVE "${WMA_TESTS_OPT}")
-elseif(WMA_TESTS_SANITIZE MATCHES "thread" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+elseif(WMA_TESTS_SANITIZE MATCHES "thread")
     set(WMA_TESTS_OPT_EFFECTIVE "-O0")
 else()
     set(WMA_TESTS_OPT_EFFECTIVE "-O1")
