@@ -147,7 +147,7 @@ jobs:
   # build + ctest pass driven by scripts/run-cpp-tests.sh.
   cpp-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # peor medido: 13.4 min
+    timeout-minutes: 30  # peor medido: 8.0 min (run 43206186559, 5 intentos, 2026-11-12; en modo PR, detector con traza: en push a master corre --full y ese camino no se midio)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -240,8 +240,18 @@ jobs:
       # 0/10— porque un `sleep_for(120ms)` es tiempo ABSOLUTO y ahogar la maquina
       # no achica esa ventana. Lo que reproduce es COLAPSARLA: 10/10 en 2 segundos.
       # ---------------------------------------------------------------------
+      # MINI-057. En el PR re-corre SOLO los tests que la corrida de arriba trazo
+      # (`$BUILD/wait-trace/`, que deja el mismo run-cpp-tests.sh de este job, sobre
+      # el mismo arbol); sin traza valida corre todo y lo dice. En `push: master`
+      # corre la suite ENTERA: la traza es el atajo del PR, no la red (invariante
+      # D4 en el encabezado del script).
       - name: Ningun test depende del reloj de pared — REQ-002
-        run: bash scripts/check-time-dependence.sh
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            bash scripts/check-time-dependence.sh --full
+          else
+            bash scripts/check-time-dependence.sh
+          fi
 
       - name: Toda espera cruda en un test esta clasificada — self-test
         run: python3 scripts/check-test-waits.py --self-test
@@ -337,7 +347,7 @@ jobs:
   # teardown path — the highest-risk code as the driver plan gains new logic.
   cpp-tests-asan:
     runs-on: ubuntu-latest
-    timeout-minutes: 25  # peor medido: 6.6 min
+    timeout-minutes: 25  # peor medido: 16.5 min (run 43206186559, 5 intentos, 2026-11-12)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -380,7 +390,7 @@ jobs:
   # handoff are the #1 candidates for latent data races.
   cpp-tests-tsan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # peor medido: 10.6 min
+    timeout-minutes: 30  # peor medido: 26.6 min (run 43206186559, 5 intentos, 2026-11-12); la base con la misma configuracion (TSan -O0 en los dos lados) llego a 1738 s = 29.0 min (run 43023912835, sobre d581137) y el MINI suma ~40 s de build; el peor del MINI sigue siendo 26.6 min
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -452,7 +462,7 @@ jobs:
   # ubuntu, y un include prohibido es igual de rojo dicho por Linux.
   cpp-tests-macos:
     runs-on: macos-latest
-    timeout-minutes: 20  # peor medido: 4.3 min
+    timeout-minutes: 20  # peor medido: 9.7 min (base a -O0, run 43023912835; el MINI a -O1 fue 7.7 min, 462 s, pero macOS vuelve a -O0, MINI-057 D23)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:

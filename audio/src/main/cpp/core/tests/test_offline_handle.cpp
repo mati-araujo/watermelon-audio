@@ -680,11 +680,11 @@ TEST_P(OfflineHandleEngines, AC_055_15_RendersAtLeastTenTimesFasterThanRealTime)
     // el reloj de pared mediria la carga, no el render. Build de la suite: Debug.
     WMA_SKIP_IF_SANITIZED();
 #if !defined(__OPTIMIZE__)
-    // La suite del gate es Debug (-O0): ahi el mismo render da ~6,5-6,9x (medido el
-    // 2026-10-26), y el numero mide el compilador, no el motor que se distribuye
-    // (-O3). Igual que bajo sanitizers, SKIPPED y nunca PASSED; el umbral NO se
+    // Sin optimizar (-O0: TSan, Windows (D29), macOS (D23) o WMA_TESTS_OPT=-O0; ubuntu/GCC va a -O1) el mismo render
+    // da ~6,5-6,9x (medido el 2026-10-26), y el numero mide el compilador, no el motor que
+    // se distribuye (-O3). Igual que bajo sanitizers, SKIPPED y nunca PASSED; el umbral NO se
     // baja. Se corre con la suite en Release: docs/dev/render-offline.md.
-    GTEST_SKIP() << "el costo se mide en un build optimizado (la suite del gate es Debug)";
+    GTEST_SKIP() << "el costo se mide en un build optimizado (este build es -O0)";
 #endif
     constexpr double kMinRealTimeFactor = 10.0;
     constexpr int kSeconds = 10;

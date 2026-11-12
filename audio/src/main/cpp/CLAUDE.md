@@ -63,6 +63,36 @@ callback violaba estas reglas en **65 lugares**, y dos sobrevivian a `NDEBUG` po
 
 - `bash scripts/run-cpp-tests.sh` corre ctest en PARALELO (149,7 s → 20,4 s el 18/08);
   `CTEST_JOBS=n` lo baja. El total lo imprime ctest; no se escribe en ningun doc (REQ-021).
+- La suite compila a **`-O1 -g` con asserts vivos** (`Debug`, sin `NDEBUG`), por `WMA_TESTS_OPT` en
+  `tests/CMakeLists.txt`: vacio = automatico, `-DWMA_TESTS_OPT=-O0` para depurar, un valor
+  explicito siempre manda. A `-O0` los tests que miden DSP pagaban 4 a 12 veces el costo
+  optimizado. Quedan a `-O1` en Linux (GCC), ASan/UBSan incluidos; en macOS toda la suite, sanitizers incluidos, va a `-O0` (D23). Excepciones declaradas y MEDIDAS (viven en el mismo `if` de
+  `tests/CMakeLists.txt`), no las "arregles" subiendo el nivel:
+  - **Windows (MinGW) a `-O0`** (D29): la suite no se puede verificar desde la PC de desarrollo (App Control bloquea
+    los `.exe`) y a `-O1` activaria skips por `__OPTIMIZE__` (`tests/windows-not-run.txt`) y techos de pared sin
+    medir; pasarlo a `-O1` es seguimiento.
+  - **macOS (Apple clang) a `-O0`** (D23): a `-O1` cambia el veredicto de
+    `SongMix.ABurstOfMixSettersAgainstTheCallbackAllocatesNothingAndStaysInsideThePeriod` (run 43206186559,
+    intento 5: un callback de 10 902 875 ns contra su periodo de 5 333 333 ns); a `-O0` esa asercion del maximo
+    no se evalua (`__OPTIMIZE__`), igual que en master. Si otro test de macOS cambia de veredicto a `-O1`, se
+    nombra aca.
+  - **TSan a `-O0`** (D6): a `-O1` GCC expande en linea el `memcpy` del payload del anillo SPSC y
+    TSan no ve la carrera (carrera sembrada: 0/5 y 0/300 a `-O1`; run 42942604293). ASan/UBSan sí
+    ven sus mutaciones 5/5 a `-O1`.
+  - **El test de costo de la compuerta de envios vive en `core_cost_tests`, TODAS las TUs del target a `-O0` en
+    todas las plataformas** (D20): `core/tests/test_soundfont_effects_send.cpp` + `tsf_impl.cpp` +
+    `SoundFontManager.cpp` + `Logger.cpp` son fuentes del target y `target_compile_options(-O0)` va
+    ULTIMO en la linea (`core/tests/CMakeLists.txt`); ninguna libreria del repo se linkea (D25: una
+    dependencia nueva a `-O1` falla en el link); gtest queda al nivel de la suite (`-O1` en Linux; `-O0` en TSan, Windows y macOS), y el test gana el COMDAT por orden de objeto. Motivo: con GCC 15.2 a `-O1` la compuerta dio 3,66x contra 1,5x en un
+    intento (run 42971401043), y un `-O0` por archivo dentro de `core_tests` (D17, revertido) no
+    alcanza: reverb y chorus son `inline`, otras TUs a `-O1` del mismo ejecutable emiten su copia
+    COMDAT y GNU ld se queda con la primera (unidades/tsf 0,32x–0,39x contra ~1,08x). La excepcion de macOS de D15 (para este test) salió porque el test corre aislado a `-O0`; macOS volvió a `-O0` por otro test (D23, arriba). No mezcles
+    niveles dentro de ese binario ni le agregues fuentes a `-O1`.
+- Con `-Werror` el gate queda atado a warnings que dependen del optimizador y de la version de GCC
+  del runner, que no esta fijada (hoy GCC 15.2.0 en `ubuntu-latest`; GCC 16 marca mas, p. ej.
+  `trebleFreq`). Un rojo asi se arregla en el CODIGO, nunca con `-Wno-*`.
+- El detector de reloj (`check-time-dependence.sh`) re-corre sólo lo que esperó a ciegas; ver
+  `scripts/CLAUDE.md`. La traza vive en `tests/build/wait-trace/` y la escribe `run-cpp-tests.sh`.
 - Los sanitizers NO son opcionales (el CI tiene un job para cada uno y encontraron dos bugs
   reales). Comandos en el `CLAUDE.md` raiz; **localmente van con `CTEST_JOBS=4`**: a full, TSan da
   timeout en `RateInvariance.*` y `NyquistLimits.*` por contencion de memoria. Ante un timeout,

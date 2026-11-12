@@ -2,6 +2,8 @@
 
 Movido del `CLAUDE.md` raiz por MINI-044 (2026-10-09). La regla corta vive en `audio/src/main/cpp/CLAUDE.md`.
 
+Los tiempos de abajo son de antes de MINI-057 (la suite entera a `-O0`). Hoy ASan+UBSan va a `-O1` en Linux (GCC); en macOS toda la suite, sanitizers incluidos, va a `-O0` (D23), así que los tiempos y corridas locales de macOS de abajo son `-O0`. TSan sigue a `-O0` (D6), y Windows (D29) también: ver `docs/ci/local_first.md` §7.14.
+
 ```bash
 # Los mismos 1180 bajo sanitizers. NO son opcionales: el CI tiene un job para
 # cada uno y encontraron dos bugs reales que el resto del gate no ve.

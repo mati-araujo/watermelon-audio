@@ -887,12 +887,12 @@ TEST_F(SongMix, TheDelayTimeFollowsASampleRateChangeOfTheEngine) {
 
 // Defecto: el costo de la pasada del export (motor + bus + 8 taps de pista) cae por debajo del
 // piso de 10x tiempo real que prometio el diseno. CPU DEL HILO (el reloj de pared mediria la carga de
-// la maquina). Debug y sanitizers: SKIPPED, nunca PASSED ni con el umbral bajado; se corre con la
+// la maquina). Sanitizers y builds -O0 (TSan, Windows D29, macOS D23, WMA_TESTS_OPT=-O0): SKIPPED, nunca PASSED ni con el umbral bajado; se corre con la
 // suite en Release (docs/dev/mezcla-y-master.md).
 TEST_F(SongMix, APassWithEightTrackTapsRendersAtLeastTenTimesFasterThanRealTime) {
     WMA_SKIP_IF_SANITIZED();
 #if !defined(__OPTIMIZE__)
-    GTEST_SKIP() << "el costo se mide en un build optimizado (la suite del gate es Debug)";
+    GTEST_SKIP() << "el costo se mide en un build optimizado (este build es -O0)";
 #endif
     constexpr double kMinRealTimeFactor = 10.0;
     constexpr int kSeconds = 10;
@@ -933,11 +933,11 @@ TEST_F(SongMix, APassWithEightTrackTapsRendersAtLeastTenTimesFasterThanRealTime)
 // Defecto (hallazgo 2 del re-review): la cola no tiene tope, asi que el bus corre con envio cero
 // hasta que sus lineas se agotan (Ambient a 60 bpm: delay 1,5 s, realimentacion 0,5, ~35 s). Lo que
 // cuesta mantenerlo vivo por callback de 256 frames tiene que ser una fraccion chica del periodo.
-// CPU DEL HILO; Debug y sanitizers: SKIPPED. Imprime `[ COLA    ]`.
+// CPU DEL HILO; sanitizers y builds -O0 (TSan, Windows D29, macOS D23, WMA_TESTS_OPT=-O0): SKIPPED. Imprime `[ COLA    ]`.
 TEST_F(SongMix, KeepingTheBusAliveForTheTailCostsAFractionOfTheCallbackPeriod) {
     WMA_SKIP_IF_SANITIZED();
 #if !defined(__OPTIMIZE__)
-    GTEST_SKIP() << "el costo se mide en un build optimizado (la suite del gate es Debug)";
+    GTEST_SKIP() << "el costo se mide en un build optimizado (este build es -O0)";
 #endif
     constexpr int kCb = 256;
     constexpr int kFive = 5 * kRate / kCb;

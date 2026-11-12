@@ -35,6 +35,34 @@
 # parser del arnes de mutacion, la cobertura del lint de RT). Por eso los
 # controles corren ANTES y un fallo suyo ABORTA sin decir una palabra del resto.
 #
+# QUE RE-CORRE (MINI-057)
+# -----------------------
+# Hasta su primera llamada a `sleepFixed`, un test ejecuta lo mismo a escala 1 que
+# a escala 0 (nada mas lee la escala, y cada test es su proceso). Asi que solo los
+# tests que LLEGARON a `sleepFixed` pueden cambiar de veredicto. `run-cpp-tests.sh`
+# deja esa traza en `$BUILD/wait-trace/` (un archivo por test, ver TestWait.h) y su
+# MANIFEST; este script re-corre en paralelo SOLO esos, elegidos por NUMERO de ctest.
+#
+#   (default)  traza valida  -> solo los de la traza
+#   --full                   -> la suite entera (push a master)
+#   sin MANIFEST / otro arbol / corrida filtrada / nombre que ctest no registra
+#                            -> la suite entera, y dice por que. Falla cerrado.
+#   MANIFEST valido pero sin el probe positivo en la traza
+#                            -> exit 3, "traza ciega": nunca se cae a la suite entera, porque
+#                               eso taparia justo la ceguera que el probe existe para delatar.
+#
+# UN NOMBRE DE LA TRAZA PUEDE SER VARIOS TESTS DE CTEST: el mismo test compilado en mas de un
+# binario (looper_tests y looper_tests_dense) se registra dos veces con el mismo
+# --gtest_filter, y la traza lo ve una sola vez (un archivo por nombre). Se corren TODOS los
+# numeros que le corresponden. La afirmacion es "tests corridos == numeros elegidos", no
+# "== nombres"; ambas cantidades se imprimen.
+#
+# INVARIANTE (D4, escrito para que alguien lo rompa a sabiendas): HOY las llamadas a
+# `sleepFixed` son incondicionales en su camino. La traza solo ve un test que llego a
+# `sleepFixed` a escala 1; si una llamada pasara a depender de un resultado previo, un
+# test podria llegar a ella solo a escala 0 y la traza no lo veria. Por eso en
+# `push: master` corre todo (`--full`): la traza es el atajo del PR, no la red.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,8 +71,38 @@ CORE="$BUILD/core_tests/core_tests"
 PROBE_POS='TimeDependenceProbe.ABlindWaitIsDetectedByTheInstrument'
 PROBE_NEG='TimeDependenceProbe.AConditionWaitSurvivesTheInstrument'
 
+# El self-test y el control del probe corren SIN la traza: si escribieran en ella, el
+# chequeo "el probe positivo esta en la traza" seria una tautologia.
+unset WMA_TEST_WAIT_TRACE
+
 only_self_test=0
-[ "${1:-}" = "--self-test" ] && only_self_test=1
+full=0
+for arg in "$@"; do
+    case "$arg" in
+        --self-test) only_self_test=1 ;;
+        --full)      full=1 ;;
+        *) echo "check-time-dependence: argumento desconocido: $arg" >&2; exit 2 ;;
+    esac
+done
+
+# Igual que run-cpp-tests.sh.
+JOBS="${CTEST_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+TRACE_DIR="$BUILD/wait-trace"
+
+# Sello del arbol de trabajo: tree-id de HEAD + cambios + archivos nuevos no
+# ignorados, via un indice temporal (no toca el indice real). Cambia si cambia
+# cualquier fuente. IDENTICA a la de run-cpp-tests.sh; si divergen, el SHA no coincide
+# y el detector corre todo (falla cerrado).
+tree_stamp() {
+    local d idx
+    d="$(mktemp -d)" || return 0
+    idx="$d/index"
+    ( cd "$ROOT" && export GIT_INDEX_FILE="$idx" \
+        && git read-tree HEAD >/dev/null 2>&1 \
+        && git add -A . >/dev/null 2>&1 \
+        && git write-tree 2>/dev/null ) || true
+    rm -rf "$d"
+}
 
 if [ ! -x "$CORE" ]; then
     echo "check-time-dependence: no encuentro $CORE" >&2
@@ -167,20 +225,167 @@ if [ $only_self_test -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. La suite, con el tiempo colapsado.
+# 2. Que se re-corre: la traza si es valida, y si no la suite entera.
 # ---------------------------------------------------------------------------
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+log="$work/ctest.log"
+select_file="$work/select"
+mode=trace; why=""
+nsel=0; nnames=0; nmulti=0; sel_names=""
+
+if [ $full -eq 1 ]; then
+    mode=full; why="--full: suite entera (push a master, D4)"
+elif [ ! -f "$TRACE_DIR/MANIFEST" ]; then
+    mode=full; why="no hay $TRACE_DIR/MANIFEST (la suite no corrio entera con run-cpp-tests.sh)"
+else
+    stamp="$(tree_stamp)"
+    man_tree="$(sed -n 's/^tree=//p' "$TRACE_DIR/MANIFEST")"
+    man_traced="$(sed -n 's/^traced=//p' "$TRACE_DIR/MANIFEST")"
+    have_traced="$(find "$TRACE_DIR" -maxdepth 1 -type f ! -name MANIFEST | wc -l | tr -d ' ')"
+    if [ -z "$stamp" ]; then
+        mode=full; why="no pude sellar el arbol con git"
+    elif [ "$man_tree" != "$stamp" ]; then
+        mode=full; why="el MANIFEST es de otro arbol ($man_tree) y no del actual ($stamp)"
+    elif [ "$man_traced" != "$have_traced" ]; then
+        mode=full; why="el MANIFEST dice $man_traced trazas y el directorio tiene $have_traced"
+    elif [ ! -e "$TRACE_DIR/$PROBE_POS" ]; then
+        # El MANIFEST es valido (mismo sello, misma cuenta) y aun asi falta el probe
+        # positivo, que llama a sleepFixed a escala 1 en la corrida entera: algo dejo de
+        # escribir la traza. Caer a la suite entera aca taparia la ceguera (AC-057.3).
+        echo "  ROTO: el MANIFEST es valido pero el probe positivo ($PROBE_POS)" >&2
+        echo "  no esta en la traza ($man_traced trazas): sleepFixed no la escribio, traza ciega." >&2
+        echo "  Un verde de aca seria ceguera, no ausencia de defectos." >&2
+        exit 3
+    fi
+fi
+
+if [ "$mode" = trace ] && ! command -v python3 >/dev/null 2>&1; then
+    mode=full; why="no hay python3 para leer el json de ctest"
+fi
+
+if [ "$mode" = trace ]; then
+    ctest --test-dir "$BUILD" --show-only=json-v1 >"$work/tests.json" 2>"$work/json.err" \
+        || { mode=full; why="ctest --show-only=json-v1 fallo: $(head -n 1 "$work/json.err")"; }
+    ctest --test-dir "$BUILD" -N >"$work/tests.txt" 2>&1 || true
+fi
+
+# Mapea cada test de ctest por el `--gtest_filter=` de su comando: el nombre que
+# registra ctest es otro (pretty, sin DISABLED_, con #GetParam() en los generadores
+# propios). El numero de `-I` es la posicion en la lista: json-v1 no trae indice, asi
+# que se contrasta contra `ctest -N`. Y NO se combina con -R/-E, que renumeran.
+cat >"$work/map.py" <<'PY'
+import json, os, re, sys
+from urllib.parse import unquote
+
+json_path, list_path, trace_dir, select_path, probe_prefix = sys.argv[1:6]
+
+def bail(msg):
+    print(msg)
+    sys.exit(10)
+
+tests = json.load(open(json_path, encoding="utf-8"))["tests"]
+listed = {}
+for line in open(list_path, encoding="utf-8", errors="replace"):
+    m = re.match(r"\s*Test\s+#(\d+):\s(.*?)\s*$", line)
+    if m:
+        listed[int(m.group(1))] = m.group(2)
+if len(listed) != len(tests) or any(listed.get(i) != t["name"] for i, t in enumerate(tests, 1)):
+    bail("la numeracion de `ctest -N` no coincide con la posicion en json-v1")
+
+by_filter = {}
+for i, t in enumerate(tests, 1):
+    for a in t.get("command", []):
+        if a.startswith("--gtest_filter="):
+            by_filter.setdefault(a[len("--gtest_filter="):], []).append(i)
+
+names = sorted(unquote(f) for f in os.listdir(trace_dir) if f != "MANIFEST")
+names = [n for n in names if not n.startswith(probe_prefix)]
+absent = [n for n in names if n not in by_filter]
+if absent:
+    bail("la traza nombra tests que ctest no registra: " + ", ".join(absent[:5]))
+if not names:
+    bail("la traza no tiene ningun test aparte del probe")
+# Un nombre mapea a UNO O MAS numeros (el mismo test en varios binarios): se eligen todos.
+nums = sorted({i for n in names for i in by_filter[n]})
+multi = [n for n in names if len(by_filter[n]) > 1]
+
+with open(select_path, "w") as f:
+    f.write("0,0,0," + ",".join(str(n) for n in nums) + "\n")
+print(len(nums))
+print(len(names))
+print(len(multi))
+for n in names:
+    ids = by_filter[n]
+    print(n if len(ids) == 1 else "%s  (%d tests de ctest: %s)" % (
+        n, len(ids), ", ".join("#%d" % i for i in ids)))
+PY
+
+if [ "$mode" = trace ]; then
+    py_rc=0
+    sel_out="$(python3 -I "$work/map.py" "$work/tests.json" "$work/tests.txt" "$TRACE_DIR" \
+        "$select_file" "${PROBE_POS%%.*}." 2>&1)" || py_rc=$?
+    if [ $py_rc -eq 0 ]; then
+        nsel="$(printf '%s\n' "$sel_out" | sed -n 1p)"
+        nnames="$(printf '%s\n' "$sel_out" | sed -n 2p)"
+        nmulti="$(printf '%s\n' "$sel_out" | sed -n 3p)"
+        sel_names="$(printf '%s\n' "$sel_out" | sed 1,3d)"
+    else
+        mode=full; why="$(printf '%s\n' "$sel_out" | tail -n 1)"
+        [ $py_rc -eq 10 ] || why="el mapeo de la traza fallo (python3 rc=$py_rc): $why"
+    fi
+fi
+
 echo
-echo "== suite con las esperas ciegas colapsadas =="
-log="$(mktemp)"; trap 'rm -f "$log"' EXIT
+if [ "$mode" = trace ]; then
+    echo "== suite con las esperas ciegas colapsadas: $nnames nombres en la traza -> $nsel tests de ctest =="
+    echo "  (un nombre puede ser varios tests de ctest: el mismo test en mas de un binario."
+    echo "   Se corren todos; $nmulti nombre(s) mapean a mas de uno. Se elige por numero, con -I.)"
+    printf '%s\n' "$sel_names" | sed 's/^/   /'
+else
+    echo "== suite ENTERA con las esperas ciegas colapsadas =="
+    echo "  motivo: $why"
+fi
 set +e
-WMA_TEST_WAIT_SCALE=0 ctest --test-dir "$BUILD" \
-    --output-on-failure --no-tests=error \
-    -E "TimeDependenceProbe" \
-    ${CTEST_JOBS:+-j "$CTEST_JOBS"} >"$log" 2>&1
+if [ "$mode" = trace ]; then
+    WMA_TEST_WAIT_SCALE=0 ctest --test-dir "$BUILD" \
+        --output-on-failure --no-tests=error -I "$select_file" -j "$JOBS" >"$log" 2>&1
+else
+    WMA_TEST_WAIT_SCALE=0 ctest --test-dir "$BUILD" \
+        --output-on-failure --no-tests=error \
+        -E "TimeDependenceProbe" -j "$JOBS" >"$log" 2>&1
+fi
 rc=$?
 set -e
 
+# El resumen de ctest ("N% tests passed, F tests failed out of M", o sin fallados:
+# "N% tests passed out of M") es lo unico que dice
+# cuantos tests corrieron. Sin el, un log truncado (OOM, rc 137) no distingue "todo verde"
+# de "no se que paso": en cualquier modo es exit 3.
+ran="$(sed -n -E 's/^[0-9]+% tests passed(, [0-9]+ tests? failed)? out of ([0-9]+).*/\2/p' "$log" | tail -n 1)"
+if [ -z "$ran" ]; then
+    echo "  ROTO: ctest termino (rc=$rc) sin imprimir su resumen 'tests passed ... out of N'." >&2
+    echo "  El log esta truncado o ctest murio (OOM = rc 137): no se que corrio. Ultimas lineas:" >&2
+    tail -n 15 "$log" | sed 's/^/   /' >&2
+    exit 3
+fi
+if [ "$mode" = trace ]; then
+    if [ "$ran" != "$nsel" ]; then
+        echo "  ROTO: se eligieron $nsel tests de ctest ($nnames nombres de la traza) y ctest corrio $ran." >&2
+        echo "  La seleccion por numero no hizo lo que dice: un verde seria ceguera." >&2
+        exit 3
+    fi
+    echo "  corridos: $ran de $nsel elegidos ($nnames nombres en la traza)"
+else
+    echo "  corridos: $ran"
+fi
+
 failed="$(sed -n '/The following tests FAILED:/,$p' "$log" | grep -E '^\s+[0-9]+ - ' || true)"
+if [ "$rc" -ne 0 ] && [ -z "$failed" ]; then
+    echo "  ROTO: ctest salio con rc=$rc pero no pude extraer ningun test fallado del log." >&2
+    echo "  No se puede declarar verde algo que ctest dio por rojo. Ultimas lineas:" >&2
+    tail -n 15 "$log" | sed 's/^/   /' >&2
+    exit 3
+fi
 
 # ---------------------------------------------------------------------------
 # El falso verde que este bloque existe para impedir.
