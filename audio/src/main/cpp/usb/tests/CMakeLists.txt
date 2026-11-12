@@ -82,4 +82,4 @@ target_link_libraries(usb_tests PRIVATE GTest::gtest_main Threads::Threads)
 
 # Register with CTest
 include(GoogleTest)
-gtest_discover_tests(usb_tests)
+wma_gtest_discover_tests(usb_tests)

@@ -59,4 +59,4 @@ target_compile_definitions(engine_tests PRIVATE
 target_link_libraries(engine_tests PRIVATE watermelon-dsp GTest::gtest_main)
 
 include(GoogleTest)
-gtest_discover_tests(engine_tests)
+wma_gtest_discover_tests(engine_tests)

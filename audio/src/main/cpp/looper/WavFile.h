@@ -9,6 +9,8 @@
 #include <cmath>
 #include <algorithm>
 
+#include "../platform/FileUtf8.h"
+
 /**
  * @brief Header-only WAV file reader/writer for stereo audio.
  *
@@ -120,7 +122,7 @@ inline std::vector<uint8_t> buildInfoChunk(const WavMetadata& meta) {
 
 /**
  * @brief Write stereo float audio to a WAV file.
- * @param filePath Output file path.
+ * @param filePath Output file path (UTF-8).
  * @param buffer Stereo interleaved float samples [-1.0..+1.0].
  * @param numFrames Number of stereo frames.
  * @param sampleRate Sample rate (default 48000).
@@ -148,7 +150,7 @@ inline bool writeWav(const char* filePath,
     const uint32_t infoSize = static_cast<uint32_t>(infoChunk.size());
     header.fileSize = sizeof(WavHeader) - 8 + header.dataSize + infoSize;
 
-    std::ofstream file(filePath, std::ios::binary);
+    std::ofstream file = wma::platform::openOutUtf8(filePath, std::ios::binary);
     if (!file.is_open()) return false;
 
     // RIFF header + fmt + data header
@@ -346,7 +348,7 @@ inline uint64_t wavDecodeEntries() { return detail::decodeEntries().load(std::me
 inline WavReadStatus readWavInfo(const char* filePath, WavInfo& out) {
     out = WavInfo{};
     if (!filePath) return WavReadStatus::Io;
-    std::ifstream file(filePath, std::ios::binary);
+    std::ifstream file = wma::platform::openInUtf8(filePath, std::ios::binary);
     if (!file.is_open()) return WavReadStatus::Io;
     return detail::scanWavHeader(file, out);
 }
@@ -361,7 +363,7 @@ inline WavData readWav(const char* filePath) {
     WavData result;
     if (!filePath) return result;
 
-    std::ifstream file(filePath, std::ios::binary);
+    std::ifstream file = wma::platform::openInUtf8(filePath, std::ios::binary);
     if (!file.is_open()) return result;
 
     WavInfo info;

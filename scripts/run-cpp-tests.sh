@@ -20,6 +20,11 @@ SRC_DIR="$REPO_ROOT/audio/src/main/cpp/tests"
 BUILD_DIR="$SRC_DIR/build"
 DEPS_DIR="$SRC_DIR/.deps"
 
+# AC-061.1: el listado de lo que no corre en Windows == los tests que usan WMA_WINDOWS_NOT_RUN. Es
+# estatico y barato, asi que falla ANTES de compilar; la mitad de resultados la corre run-cpp-tests.ps1.
+python3 "$REPO_ROOT/scripts/check-windows-not-run.py" --self-test >/dev/null
+python3 "$REPO_ROOT/scripts/check-windows-not-run.py"
+
 GEN_ARGS=()
 if command -v ninja >/dev/null 2>&1; then
     GEN_ARGS=(-G Ninja)

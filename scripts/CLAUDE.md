@@ -33,11 +33,76 @@ camino critico de un PR atestado (`local_first.md` §2).
   `sleep_for(120ms)` es tiempo absoluto y el render lento le da MAS margen). Colapsar la
   espera: 10/10 en 2 s. Cubre UNA clase; no ve una espera POR CONDICION que se vuelve
   inalcanzable ni las esperas de AUSENCIA (falso VERDE). El script lo imprime.
-- `check-cpp-portability.sh` (WA-0.4): `jni.h` / `android/` fuera de su capa.
+- `check-cpp-portability.sh` (WA-0.4, REQ-061 AC-061.7): regla 1, `jni.h` / `android/` fuera de su capa; regla 2, una API
+  sólo-POSIX o sólo-Windows fuera de su capa (`platform/`, el backend de su plataforma, `usb/`, `jni/`), por header Y por
+  SÍMBOLO suelto medido (`lstat`, `link(`, `O_NOFOLLOW`...: viven en headers que MinGW sí tiene, así que un lint de headers no
+  los ve; comentarios y strings se ignoran). Dos baselines, TRINQUETES en las dos direcciones (una violación no listada falla,
+  una entrada que ya no se reproduce falla), hoy vacíos: `cpp-portability-baseline.txt` (`ruta|API`) y
+  `windows-cross/baseline.txt` (fuentes cuyo objeto no compila para Windows). Su diff es la revisión; nunca se agrega una
+  entrada para acallar un rojo. `--self-test` primero.
+- `check-windows-not-run.py` (REQ-061 AC-061.1): lo que NO corre en Windows se declara, no se esconde. El listado
+  `tests/windows-not-run.txt` lleva `Suite.Test | razon` (test POSIX por naturaleza: `WMA_WINDOWS_NOT_RUN("razon")`,
+  `tests/support/WindowsNotRun.h`) y las secciones `variante` (cuerpo con un `#if` de plataforma), `ambiente`
+  (prefijo exacto de un skip de ambiente), `solo-windows`, `deshabilitado` (TEST con prefijo `DISABLED_`),
+  `posix-solo | target | Suite.Test | razon` (se compila en POSIX y no en Windows) y las dos de HALLAZGO
+  `cmake | ruta | construccion | razon` y `fuera | ruta | condicion | razon` (todo `#if` de plataforma FUERA de los cuerpos
+  de TEST, sin numeros de linea; N apariciones = N entradas); TODA entrada con razon y trinquete en las dos direcciones.
+  Son TRES partes y cada una ve una cosa distinta:
+  1. **Diff de registro** (`windows-cross/check.py`, abajo): la verdad. Que TESTS se compilan en cada lado, por `nm`.
+  2. **Estatica** (`python3 scripts/check-windows-not-run.py`, en `gate.sh`, CI y `run-cpp-tests.sh`, con su `--self-test`
+     antes): lo que (1) NO ve porque el TEST SI se registra pero queda vacio o filtrado. Fuentes: ningun TEST/INSTANTIATE
+     bajo un `#if` de plataforma/compilador (`_WIN32`, `__APPLE__`, `__GNUC__`, `__clang__`, `_POSIX_*`, `GTEST_OS_*`...),
+     ningun `#if` asi en un cuerpo sin declarar (`variante`) ni fuera de los cuerpos sin declarar (`fuera`). CMake (los
+     CMakeLists de tests Y los `.cmake` que incluyen, `thirdparty/googletest.cmake` incluido; parentesis balanceados):
+     bajo un `if()` de plataforma o de compilador (`WIN32`, `UNIX`, `APPLE`, `MINGW`, `MSVC`, `CMAKE_SYSTEM_*`,
+     `CMAKE_HOST_*`, `CMAKE_*_COMPILER*`, `ENV{MSYSTEM}`) todo `return()`, target, `list(FILTER|REMOVE_*)`, fuente de test,
+     definicion (`target_compile_definitions`, `add_definitions`, `-D`) o propiedad (`set_*_properties`, `TIMEOUT`); en
+     cualquier lado un genex con `PLATFORM_ID`/`*_COMPILER_ID`, un `${WIN32}`, y `DISABLED`/`TEST_FILTER`/`EXTRA_ARGS`/
+     `SKIP_REGULAR_EXPRESSION`/`WILL_FAIL`/`EXCLUDE_FROM_ALL` sobre algo que ctest registra. Cada hallazgo se declara
+     `cmake | ruta | clave | razon`. 🔴 Es una lista de construcciones: lo que se le escape lo caza (1) si saca el
+     TEST, y NADIE si lo deja registrado y lo vacia por una variable que el parser no sigue (`set(X ${Y})`).
+  3. **Resultados** (`--results DIR --build-dir BUILD`, lo corre `run-cpp-tests.ps1` en Windows): cada test que lista
+     cada exe de la suite (`<exe> --gtest_list_tests`; suites parametrizadas y typed incluidas) tiene su XML (sin XML = ctest
+     no lo corrio: `-E`, `TEST_FILTER`, `DISABLED`), ningun `<failure>` aunque ctest haya salido 0, todo skip declarado
+     (marcador contra el listado, ambiente por prefijo, sin mensaje = rojo). `--partial` (`-Filter`/`-Fast`) tolera los
+     registrados sin XML; un `<failure>` sigue rojo. Si Smart App Control no deja ejecutar un exe para listarlo, es ROJO.
+     🔴 TODO es POR TARGET: el XML de `gtest-xml/<target>/` ata cada test a su exe (`looper_tests` y `looper_tests_dense`
+     registran los mismos 207 nombres: un conjunto global dejaba que el XML de uno tapara al otro). Un test registrado por
+     un exe necesita SU XML en SU directorio; el skip del listado se compara por target (corre en uno y se saltea en otro =
+     rojo). Rojo tambien: un `*_include.cmake` sin `TEST_XML_OUTPUT_DIR` (o que no termina en el nombre del target) y,
+     estatico, un `gtest_discover_tests` directo fuera de `function(wma_gtest_discover_tests)` (se declara como `cmake`).
+  🔴 El inventario `fuera` obliga a DECLARAR cada `#if` de plataforma fuera de un cuerpo, pero no juzga si la razon es
+  cierta: que no cambie lo que el test afirma se revisa a mano.
+- `windows-cross/check.py` (REQ-061, `gate.sh --only windows-cross`; también compila la DLL Release de `desktop/` (`--dll`: -O3, -Werror, -static) y corre `check-jni-symbols.py --pe/--imports` sobre ella; Mac con Homebrew o contenedor Fedora, `build-image.sh`):
+  (a) compila los OBJETOS de `desktop/` y de la suite de host para Windows (MinGW-w64, Debug, `-Werror`), baseline-trinquete
+  sobre FUENTES (`windows-cross/baseline.txt`); (b) compila la suite POSIX con el compilador NATIVO del host (Mac: el de
+  Xcode; contenedor: `gcc-c++`, pineado en `toolchain-pins.json`) en `build/windows-cross/<prefijo>/tests-posix`, y compara
+  con `nm` las clases `<Suite>_<Test>_Test::TestBody` que define cada target de test (TEST_P y plantillas de TYPED_TEST
+  incluidas, el espacio de nombres y los argumentos de plantilla se descartan): POSIX - Windows == `posix-solo` y
+  Windows - POSIX == `solo-windows`, por target. Un target que el host no construye es «no verificable en este host» (se
+  informa, en verde). 🔴 NO ve: un `INSTANTIATE_TEST_SUITE_P` que solo existe en un lado (la clase del TEST_P esta en los
+  dos; lo caza la estatica), ni nada que cambie sin cambiar la lista de clases (eso es el `--results` de Windows), ni
+  corre nada. Una fuente de tests que NO compila para Windows (en el baseline) no frena el diff: se excluyen sus objetos de
+  los DOS lados (sus clases no se cuentan en ninguno) y se informa cual; un target de test sin NINGUN objeto vivo es ROJO.
+  TYPED_TEST_P (`gtest_suite_<S>_::<N><T>::TestBody()`) se mapea a `S_N_Test`; los nombres se JUNTAN, nunca se parten por
+  `_` (el arbol tiene tests con `_` y ninguna suite con `_`; `Suite_With_Underscores` esta en el self-test). En la Mac no se pudo medir desde la PC Windows: ahi el diff usa `nm` + `c++filt` de Xcode.
+- `gate-windows.ps1` (REQ-061): el gate LOCAL de la PC Windows (MSYS2 UCRT64), PowerShell 5.1; no atesta, no baja nada y
+  no escribe en el árbol: compara por CONTENIDO antes y después (`git status --porcelain=v1 --untracked-files=all`, hash de
+  `git diff HEAD --binary` y de cada untracked); la suite escribe en `audio/src/main/cpp/tests/build` (declarado) y en `.../tests/.deps/googletest-build` (no declarable: `.deps` está ignorado entero y preexiste, así que el chequeo no ve lo de adentro). Los untracked se leen como UTF-8 (PS 5.1 usa OEM: un `diseño.md` rompía el snapshot). Tiene `-SelfTest`. Su límite: una escritura dentro de un dir ignorado preexistente no
+  se ve. `run-cpp-tests.ps1 -Offline`: configura sin red y sale 2 con mensaje si falta googletest o si su `HEAD` no es el SHA de `thirdparty/googletest.cmake` (se lee de ahí; un bump correría en verde contra el checkout viejo); se actualiza FUERA del gate, sin `-Offline`. Pasos: `pin` (el GCC es el de
+  `toolchain-pins.json`, lógica compartida en `windows-toolchain.ps1` con `run-cpp-tests.ps1`), `lint`, `suite`
+  (`run-cpp-tests.ps1 -Offline -TimeoutSec 180`: ctest con timeout por test), `dll` (build Release en `%LOCALAPPDATA%\Temp\wma-gate-windows`,
+  `--pe`/`--imports`), `jvm` (`System.loadLibrary` + `nativeIsEngineInitialized()==false` con PATH reducido; `-SkipJvm` lo
+  salta, deja la corrida PARCIAL y lo dice), `repo`. Fija `SetErrorMode` antes de lanzar hijos: un crash o `abort()` vuelve solo, sin diálogo de WER.
+  `-Only <paso>` sirve para iterar y NO cuenta como corrida completa. La suite construye en `tests/build` (ignorado).
 - `check-jni-signatures.py` (REQ-025): la FIRMA del cruce JNI. 🔴 Su guarda de COMPLETITUD lo
   sostiene: si el parser abarca menos prototipos de los que hay en el arbol, FALLA. Sin baseline:
   nacio en cero desajustes. Las tres preguntas: `audio/src/main/cpp/jni/CLAUDE.md`.
-- `check-jni-symbols.py` (MINI-001): sólo NOMBRES contra el `.so`.
+- `check-jni-symbols.py` (MINI-001): sólo NOMBRES contra el `.so`. REQ-061: `--pe DLL` exige exports == `external fun` menos
+  USB y menos el benchmark de Oboe (REQ-061 D12: regiones `#if WMA_JNI_USB`, `jni_usb.cpp`, `jni_benchmark.cpp`, restados
+  por archivo; más `JNI_OnLoad`/`JNI_OnUnload`, sin stubs) (el `.def`/`--export-all-symbols` no existen: salen sólo los `JNIEXPORT`) e `--imports DLL` exige que la DLL importe
+  sólo `KERNEL32.dll` y `api-ms-win-crt-*` (un runtime que no viaja dentro, como `libwinpthread-1.dll`, es rojo). Ambos leen
+  `objdump -p` (`--objdump X` o `$OBJDUMP`).
 - La ruta del bridge Kotlin que leen `check-jni-symbols`, `check-jni-signatures` y
   `check-doc-counts` es UNA constante: `jni_bridge_source.py` (el source set, REQ-055 S1).
 - `check-release-flags.py` (MINI-036): las flags EFECTIVAS del `.so` de `assembleRelease` en las 4

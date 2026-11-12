@@ -9,6 +9,8 @@
 #include "support/CApiFixture.h"
 #include "support/RtAllocCounter.h"
 #include "tests/support/TestSanitizer.h"
+#include "tests/support/PathUtf8.h"
+#include "tests/support/ThreadCpu.h"
 #include "tests/support/TestWait.h"
 
 #include "core/SongSpaceBus.h"
@@ -39,7 +41,7 @@ constexpr int kRate = 48000;
 constexpr int kLoop = 4800;   // 100 ms
 constexpr int kBlock = 512;
 
-std::filesystem::path mixFixture(const std::string& name) {
+Utf8Path mixFixture(const std::string& name) {
     return std::filesystem::temp_directory_path() /
            ("wm" + std::to_string(static_cast<long long>(getpid())) + "_smix_" + name + ".wav");
 }
@@ -1004,12 +1006,6 @@ struct LiveMix {
         e = nullptr;
     }
 };
-
-int64_t threadCpuNs() {
-    timespec ts{};
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-}
 
 }  // namespace
 

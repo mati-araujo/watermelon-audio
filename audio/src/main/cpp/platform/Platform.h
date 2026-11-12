@@ -11,7 +11,8 @@
  *
  * Implementations are in platform-specific .cpp files:
  * - PlatformAndroid.cpp (ARM64 NEON, ARMv7 NEON, x86_64 SSE)
- * - PlatformDesktop.cpp (future: macOS/Linux/Windows)
+ * - PlatformApple.cpp (iOS / macOS)
+ * - PlatformWindows.cpp (REQ-061)
  */
 
 #include <cstdint>

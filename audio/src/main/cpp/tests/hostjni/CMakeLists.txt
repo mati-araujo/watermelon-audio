@@ -83,6 +83,17 @@ add_subdirectory(${WMA_CPP_ROOT}/looper   ${CMAKE_BINARY_DIR}/looper)
 # El motor tal como lo linkea la suite de host (core/tests/CMakeLists.txt), MAS
 # la capa JNI. `jni/jni_benchmark.cpp` queda afuera: depende de <oboe/Oboe.h> y
 # no cross-compila — medido, y declarado como hueco en spec.md.
+# La capa de plataforma: Windows (REQ-061) o POSIX (Linux, macOS: PlatformAndroid.cpp, como siempre).
+if(WIN32)
+    set(WMA_PLATFORM_OS_SOURCES
+        ${WMA_CPP_ROOT}/platform/PlatformWindows.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFileWindows.cpp)
+else()
+    set(WMA_PLATFORM_OS_SOURCES
+        ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFilePosix.cpp)
+endif()
+
 add_library(watermelon_audio SHARED
     ${WMA_CPP_ROOT}/jni/jni_audio_bridge.cpp
     ${WMA_CPP_ROOT}/jni/jni_engine.cpp
@@ -101,7 +112,7 @@ add_library(watermelon_audio SHARED
     ${WMA_CPP_ROOT}/nodes/InputNode.cpp
     ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
     ${WMA_CPP_ROOT}/platform/Logger.cpp
-    ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp
+    ${WMA_PLATFORM_OS_SOURCES}
     ${WMA_CPP_ROOT}/backends/BackendManager.cpp
     ${WMA_CPP_ROOT}/backends/SplitBackend.cpp
     ${WMA_CPP_ROOT}/backends/DriftResampler.cpp

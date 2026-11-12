@@ -12,11 +12,19 @@
 
 cmake_minimum_required(VERSION 3.22.1)
 
+# Las primitivas de disco del volcado dependen del SO (REQ-061 AC-061.4): Win32 o POSIX.
+if(WIN32)
+    set(WMA_DUMP_FILE_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../platform/DumpFileWindows.cpp)
+else()
+    set(WMA_DUMP_FILE_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../platform/DumpFilePosix.cpp)
+endif()
+
 add_library(watermelon-analysis STATIC
     AnalysisRing.cpp
     AnalysisThread.cpp
     TunerInputDump.cpp
     WavFileDumpSink.cpp
+    ${WMA_DUMP_FILE_SOURCE}
     SpectralSupportProbe.cpp
     OfflineAnalysis.cpp
     PhaseSlopeEstimator.cpp

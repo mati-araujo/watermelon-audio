@@ -16,6 +16,8 @@
 #include "support/RenderChecks.h"
 #include "support/RtAllocCounter.h"
 #include "tests/support/TestSanitizer.h"
+#include "tests/support/PathUtf8.h"
+#include "tests/support/ThreadCpu.h"
 #include "tests/support/TestWait.h"
 
 #include "looper/WavFile.h"
@@ -33,6 +35,9 @@
 #include <vector>
 
 #include <unistd.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #include <gtest/gtest.h>
 
@@ -44,7 +49,7 @@ constexpr int kLoop = 4800;           // 100 ms
 constexpr int kOutputDelay = 240;     // lookahead del limitador de salida
 constexpr int kBlock = 512;
 
-std::filesystem::path songFixture(const std::string& name) {
+Utf8Path songFixture(const std::string& name) {
     return std::filesystem::temp_directory_path() /
            ("wm" + std::to_string(static_cast<long long>(getpid())) + "_csong_" + name + ".wav");
 }
@@ -103,12 +108,6 @@ float peakOf(const std::vector<float>& v, size_t from = 0, size_t to = SIZE_MAX)
     float p = 0.0f;
     for (size_t i = from; i < std::min(to, v.size()); ++i) p = std::max(p, std::abs(v[i]));
     return p;
-}
-
-int64_t threadCpuNs() {
-    timespec ts{};
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
 }
 
 class SongApi : public ::testing::Test {
@@ -647,8 +646,10 @@ TEST_F(SongApi, AC_055_13_ABurstOfPublicationsAgainstTheCallbackAllocatesNothing
                 static_cast<long long>(wma_song_get_late_adoptions(live.e)), maxUs,
                 kPeriodNs / 1000.0);
 #ifndef WMA_TEST_UNDER_SANITIZER
+#if !defined(_WIN32)   // REQ-061 D13: en Windows el CPU maximo por callback es ruido del SO, no se evalua
     EXPECT_LT(static_cast<double>(maxNs.load()), kPeriodNs)
         << "un callback tardo mas que su periodo";
+#endif
 #endif
     live.tearDown();
 }

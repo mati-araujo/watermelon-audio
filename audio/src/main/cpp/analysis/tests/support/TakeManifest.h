@@ -104,7 +104,7 @@ inline bool parseTakeUInt(const std::string& s, int64_t* out) {
 }
 
 /// Un NOMBRE de toma: `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`. Ni `/`, ni `.` inicial, ni comillas: el nombre
-/// termina en un path (`dir + "/" + nombre`) y en el `popen` de `corpus::sha256Of`, entre comillas simples.
+/// termina en un path (`dir + "/" + nombre`).
 inline bool isValidTakeName(const std::string& n) {
     if (n.empty() || n[0] == '.') return false;
     for (char ch : n) {

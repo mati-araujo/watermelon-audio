@@ -18,7 +18,15 @@
     "",
     "Bumpear este archivo cambia el digest y fuerza UNA corrida completa en CI. Eso es",
     "el comportamiento correcto: un cambio de toolchain es una decision, no una deriva.",
-    "Un verde con Xcode 26.6 no dice nada sobre Xcode 27."
+    "Un verde con Xcode 26.6 no dice nada sobre Xcode 27.",
+    "",
+    "El cruce a Windows (REQ-061): `mingw_w64_gcc` es el GCC de Homebrew mingw-w64 en la Mac (el",
+    "gate lo observa y va a la atestacion como cualquier otra clave). `_windows_cross` lleva el",
+    "resto (MSYS2 UCRT64 nativo, imagen del contenedor, formula de Homebrew): empieza con `_`",
+    "porque ESTA maquina no los puede observar, y verify-attestation.sh salta las claves con `_`.",
+    "Los leen scripts/windows-cross/{check.py,build-image.sh} y scripts/run-cpp-tests.ps1, y cada",
+    "valor vive SOLO aca (scripts/check-dep-pins.py, regla windows-cross): el Dockerfile los recibe",
+    "por --build-arg. `prefix` es el prefijo del compilador y `gcc` su -dumpfullversion exacto."
   ],
   "xcode": "26.6 (17F113)",
   "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
@@ -26,5 +34,34 @@
   "simulator_runtime": "26.5",
   "cmake": "4.4.1",
   "ninja": "1.13.2",
-  "launcher_jvm": "17.0.19"
+  "launcher_jvm": "17.0.19",
+  "mingw_w64_gcc": "16.2.0",
+  "_windows_cross": {
+    "homebrew": {
+      "formula": "mingw-w64",
+      "formula_version": "14.0.0_3",
+      "prefix": "x86_64-w64-mingw32-",
+      "gcc_key": "mingw_w64_gcc",
+      "verificado_en": "mac (pendiente: sólo se midio el equivalente UCRT64 de MSYS2 y el contenedor)"
+    },
+    "msys2_ucrt64": {
+      "root": "C:/msys64/ucrt64",
+      "package": "mingw-w64-ucrt-x86_64-gcc",
+      "package_version": "16.2.0-4",
+      "gcc": "16.2.0"
+    },
+    "container": {
+      "prefix": "x86_64-w64-mingw32ucrt-",
+      "gcc": "16.2.1",
+      "base_image": "fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c",
+      "packages": [
+        "ucrt64-gcc-c++-16.2.1-1.fc45",
+        "ucrt64-crt-14.0.0-3.fc45",
+        "ucrt64-winpthreads-static-14.0.0-3.fc45",
+        "gcc-c++-16.2.1-3.fc45",
+        "java-25-openjdk-devel-1:25.0.4.1.1-1.1.fc45"
+      ],
+      "tools": ["cmake", "ninja-build", "python3", "git", "bash"]
+    }
+  }
 }

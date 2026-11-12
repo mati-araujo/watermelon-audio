@@ -1,0 +1,90 @@
+# Tests que se registran en Windows y salen SKIPPED con `[windows-not-run]` (REQ-061 AC-061.1).
+# Una linea por test: `Suite.Test | razon`. Lo agrega quien pone WMA_WINDOWS_NOT_RUN("razon") en el test
+# (tests/support/WindowsNotRun.h); scripts/check-windows-not-run.py exige que listado y macro coincidan,
+# y que la corrida en Windows saltee exactamente estos. Un test que PUEDE correr en Windows no va aca.
+# Ademas de `Suite.Test | razon`, el listado declara (scripts/check-windows-not-run.py, cada entrada con razon y
+# trinquete en las dos direcciones: si sobra o falta, rojo):
+#   variante | Suite.Test | razon    el test corre en las dos plataformas pero su CUERPO tiene un #if de plataforma
+#   ambiente | <prefijo> | razon     un skip de AMBIENTE en la corrida de Windows: el prefijo exacto de su mensaje
+#   cmake | ruta | construccion | razon   UN hallazgo de un CMake de tests (archivo + construccion normalizada, p. ej.
+#                                    `if(WIN32) => return()`): excluye, filtra o corta algo bajo una condicion de plataforma
+#   fuera | ruta | condicion | razon  un `#if` de plataforma FUERA de los cuerpos de TEST (`if defined(_WIN32)`); sin numeros
+#                                    de linea; la misma condicion N veces en el archivo = N entradas
+#   deshabilitado | Suite.Test | razon  un TEST con prefijo DISABLED_ (no corre en ninguna plataforma)
+#   solo-windows | nombre | razon    un test (Suite.Test) o una fuente (archivo.cpp) que existe SOLO en Windows
+#   posix-solo | target | Suite.Test | razon   un test que se compila/registra en POSIX y NO en Windows (diff por nm de windows-cross)
+AudioLooper.Req055CaptureOfATakeDoesNotDropTheNextTake | FIFO (mkfifo) + poll + fcntl: el solapamiento se fuerza con un pipe POSIX que no existe en Windows
+SoundFontLoadTest.LoadFromFdAppliesTheRateItIsGiven | loadFromFd (fd + mmap de una sub-region) no existe en Windows: devuelve false por diseno
+MappedFileTest.AC_061_2_PosixMapsAnUnalignedSubRegionOfAnFd | mapFdRegion (fd + mmap de una sub-region) no existe en Windows: ahi lo cubre AC_061_2_WindowsRefusesTheFdPath
+MappedFileTest.AC_061_2_PosixRejectsARegionOutsideTheFileAndABadFd | mapFdRegion (fd + mmap de una sub-region) no existe en Windows: ahi lo cubre AC_061_2_WindowsRefusesTheFdPath
+WavSinkTest.Hallazgo1_ASymlinkAtThePartIsNeverFollowed | el symlink exige privilegio en Windows (SeCreateSymbolicLinkPrivilege); ahi lo cubre WavDumpWindowsTest.AC_061_4_ASymlinkAtThePartIsNeverFollowed
+WavSinkTest.BugB_AnAbortResidueBelongsOnlyToTheTakeThatLeftIt | el hilo escritor de la toma viva tiene el .part abierto con share mode 0: en Windows ni se renombra ni se borra, y la premisa (un .part ajeno bajo una toma que sigue viva) no se puede armar; el sink solo, sin hilo, lo cubre WavDumpWindowsTest.AC_061_4_AbortNeverRemovesAPartItDidNotCreate
+
+# --- variantes: la PREMISA o el estimulo cambia en Windows, la asercion no; o, por decision registrada (REQ-061 D13), deja de evaluar una asercion que en esa plataforma mide ruido del SO (la razon nombra la decision y lo que si se evalua) ---
+variante | WavSinkTest.BugB_AbortPartNeverRemovesAFileItDidNotCreate | en POSIX el .part ajeno se arma con std::rename encima del .part vivo; en Windows (share mode 0) se arma haciendo fallar finishPart contra un destino ocupado, que cierra el archivo, y reemplazando el .part cerrado. Las aserciones son las mismas
+variante | OutputProfiles.ProtectedIsTheTwoTwentyThreeOutputBitForBit | el golden de 2.23.0 es de macOS arm64 (otra libm da otro ultimo bit): solo ahi se ejecuta, en el resto sale SKIPPED con el mensaje declarado como `ambiente`; la prueba estructural cubre el resto
+variante | SongApi.AC_055_13_ABurstOfPublicationsAgainstTheCallbackAllocatesNothingAndNeverTears | REQ-061 D13: en Windows no se evalua SOLO la asercion de CPU maximo por callback contra el periodo (5333 us); siguen las alocaciones, el desgarro, las adopciones y el printf `rafaga`. Medido: sin carga mediana 330 us y picos de 4594 us (86 % del periodo), bajo ctest -j 12 picos de 5733 us: ruido del SO que QueryThreadCycleTime le carga al hilo. La medicion del peor caso en Windows pasa a REQ-062
+
+# --- ambiente: skips que dependen de lo que hay instalado o del build, no de la plataforma ---
+ambiente | ERROR_PRIVILEGE_NOT_HELD: crear symlinks | crear un symlink pide modo desarrollador o SeCreateSymbolicLinkPrivilege; la junction y el reparse point ajeno (sin privilegio) cubren lo mismo
+ambiente | el costo se mide en un build optimizado | tests de costo: la suite del gate es Debug (igual en POSIX)
+ambiente | golden de 2.23.0 capturado en macOS arm64 | ver la variante OutputProfiles.ProtectedIsTheTwoTwentyThreeOutputBitForBit
+ambiente | medicion a pedido: WMA_MEASURE_OFFLINE_MEMORY=1 | medicion a pedido, apagada por defecto en todas las plataformas
+ambiente | sin AC4_OUT_DIR | herramienta que escribe WAV solo si se le da un directorio
+ambiente | sin GeneralUser_GS.sf3 | el SoundFont de NoisyPad no esta en el checkout (WMA_GENERALUSER_SF3)
+ambiente | sin corpus grabado (ausente o manifiesto vacio) | el corpus se baja con scripts/fetch-corpus.sh (release corpus-v1) y esta maquina no lo tiene; sin el, SKIPPED y nunca passed
+ambiente | sin el material del spec-test | se baja con scripts/fetch-spec-test.sh
+ambiente | sin la toma real del g42 | la toma real no se versiona (corpus-g42-manifest.txt)
+ambiente | sin material del spec-test | se baja con scripts/fetch-spec-test.sh
+
+# --- cmake: UN hallazgo por entrada (archivo + construccion normalizada); el archivo entero no se exime ---
+cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return() | return() bajo if(WIN32): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; libusb_descriptor_tests y libusb_backend_lifetime_tests no se configuran en Windows; ya estaba asi en master
+cmake | tests/CMakeLists.txt | if(WIN32) => add_compile_definitions(__USE_MINGW_ANSI_STDIO=1) | MinGW trae por defecto un printf (msvcrt) que rechaza %zu/%lld: esta definicion lo pasa al stdio C99 para que -Wformat valide contra la semantica del target real; solo cambia el chequeo de formatos, no el estimulo de ningun test
+# (core/tests: `EXCLUDE_FROM_ALL` de sf_render_preset NO se declara: el chequeo ve que ningun CMake lo registra en ctest, o sea que no es un test, REQ-040)
+
+# --- posix-solo: tests que se compilan/registran en POSIX y NO en Windows (el diff de scripts/windows-cross/check.py) ---
+# `posix-solo | target | Suite.Test | razon`: el diff de clases `<Suite>_<Test>_Test::TestBody` de los objetos de cada target, POSIX - Windows,
+# tiene que ser EXACTAMENTE esto, por target (para un TEST_P / TYPED_TEST, el nombre de la suite del macro, no el instanciado). Un target que el host
+# POSIX no construyo se informa como no verificable en ese host, en verde.
+posix-solo | libusb_backend_lifetime_tests | LibusbBackendLifetime.AC_042_1_FallbackWaitsForAReadInProgress | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_backend_lifetime_tests | LibusbBackendLifetime.AC_042_1_FallbackRacesReadersComingAndGoing | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_backend_lifetime_tests | LifecycleVersusDestroyer.AC_042_1_DestroyerWaitsForALifecycleOperation | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_backend_lifetime_tests | LibusbBackendLifetime.D5_ReadersDoNotWaitForTheFallbackStop | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_backend_lifetime_tests | LibusbBackendLifetime.D5_ReadersAreNotBlockedByALifecycleOperation | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_backend_lifetime_tests | LibusbBackendLifetime.AC_042_2_GettersSayNoDataWhileStartHoldsTheBackend | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_backend_lifetime_tests | LibusbBackendLifetime.AC_042_2_GettersRaceStartRecreatingTheTransferManager | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_backend_lifetime_tests | UsbTransferStatsArray.EveryIndexCarriesItsOwnField | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_backend_lifetime_tests | UsbTransferStatsArray.NoDataIsAllZeros | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_descriptor_tests | LibusbDescriptorCve.ValidConfigDeliversItsEndpoint_AC_047_5 | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_descriptor_tests | LibusbDescriptorCve.EndpointsDeclaredButMissingKeepTheInvariant_AC_047_5 | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_descriptor_tests | LibusbDescriptorCve.ValidConfigDeliversItsIad_AC_047_5 | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+posix-solo | libusb_descriptor_tests | LibusbDescriptorCve.IadCountLoopDoesNotReadPastTheBuffer_AC_047_5 | el target no se configura en Windows (`cmake | usb/tests/libusb/CMakeLists.txt | if(WIN32) => return()`): el nucleo de libusb para Windows es otro (events_windows, threads_windows) y no es parte del motor de escritorio; ya estaba asi en master
+
+# --- fuera: `#if` de plataforma FUERA de los cuerpos de TEST (sin numeros de linea; N apariciones = N entradas) ---
+# Los que viven DENTRO del cuerpo de un test que empieza con WMA_WINDOWS_NOT_RUN o estan en una `variante` no van aca.
+fuera | analysis/tests/support/Corpus.h | if defined(_WIN32) | include de <process.h> (_getpid) en Windows y <unistd.h> en POSIX; no toca ningun TEST
+fuera | analysis/tests/support/Corpus.h | if defined(_WIN32) | pid del directorio temporal del corpus (_getpid / getpid): solo el nombre unico del directorio, no el estimulo
+fuera | analysis/tests/test_analysis_thread.cpp | if defined(_WIN32) | kOverrunBlocksPerTick: 16 bloques por tick en Windows y 8 en POSIX. CAMBIA EL ESTIMULO de AnalysisThreadReq009.WhatIsPublishedAsConvergedWhileTheRingOverrunsActuallyIs, AGapIsDistinguishableFromNotConvergedYet y TheMarkClearsAndTheReadingConvergesOnceTheInputIsWholeAgain: con 8 (= kCapacityFrames) el ring solo se pisa si el analisis NO drena durante la rafaga, y en Windows (Debug, quantum de 15,6 ms) drena y la premisa no se arma ~40 % de las veces; las aserciones son las mismas
+fuera | core/tests/test_c_api_song.cpp | if defined(_WIN32) | include de <windows.h> solo en Windows; no declara ni cambia ningun TEST ni su estimulo
+fuera | core/tests/test_mapped_file.cpp | if defined(_WIN32) | includes (<io.h>, <process.h>) y WMA_TEST_GETPID = _getpid en Windows; getpid en POSIX: solo el nombre unico del archivo temporal
+fuera | core/tests/test_mapped_file.cpp | if defined(_WIN32) | envuelve los tests solo-windows AC_061_2_WindowsRefusesTheFdPath y AC_061_2_WindowsLoadFromFdReturnsFalseAndNamesTheReason (declarados abajo como `solo-windows`)
+fuera | core/tests/test_offline_handle.cpp | if defined(__APPLE__) | include de <mach/mach.h> para footprintMb()
+fuera | core/tests/test_offline_handle.cpp | if defined(__APPLE__) | footprintMb(): phys_footprint con task_info en macOS, -1.0 en el resto; solo lo usa la medicion a pedido (WMA_MEASURE_OFFLINE_MEMORY=1, skip `ambiente`), ninguna asercion de un test que corre
+fuera | core/tests/test_soundfont_load.cpp | if defined(_WIN32) | includes (<io.h>, <process.h>, fcntl) del fixture TempSf2File
+fuera | core/tests/test_soundfont_load.cpp | if defined(_WIN32) | pid del nombre del SF2 temporal (_getpid / getpid)
+fuera | core/tests/test_soundfont_load.cpp | if defined(_WIN32) | abre el fd del SF2 temporal: _wopen(O_RDONLY|O_BINARY) en Windows, open en POSIX; el fd solo lo usa LoadFromFdAppliesTheRateItIsGiven (declarado)
+fuera | core/tests/test_soundfont_load.cpp | if defined(_WIN32) | cierra el fd: _close en Windows, close en POSIX
+fuera | core/tests/test_utf8_paths.cpp | if defined(_WIN32) | includes (<process.h>) y WMA_TEST_GETPID = _getpid en Windows; getpid en POSIX
+fuera | core/tests/test_utf8_paths.cpp | if defined(_WIN32) | envuelve el test solo-windows Utf8PathTest.AC_061_3_WindowsAnInvalidUtf8PathFailsClosed (declarado abajo como `solo-windows`)
+fuera | looper/tests/support/FixturePath.h | if defined(_WIN32) | include de <process.h> y WMA_TEST_GETPID = _getpid en Windows; getpid en POSIX: solo el nombre unico del archivo temporal
+fuera | looper/tests/test_audio_looper.cpp | if !defined(_WIN32) | include de <poll.h>, que Windows no tiene; solo lo usa el FIFO de AudioLooper.Req055CaptureOfATakeDoesNotDropTheNextTake (declarado)
+fuera | looper/tests/test_audio_looper.cpp | if !defined(_WIN32) | req055Drain: helper de FIFO (fcntl, read) que solo usa AudioLooper.Req055CaptureOfATakeDoesNotDropTheNextTake (declarado)
+fuera | tests/support/ThreadCpu.h | if defined(_WIN32) | include de <windows.h> para QueryThreadCycleTime
+fuera | tests/support/ThreadCpu.h | if defined(_WIN32) | threadCpuNs(): CPU del hilo en ns; QueryThreadCycleTime calibrado en Windows (GetThreadTimes avanza de a 15,6 ms y haria saltar el limite de "un periodo"), clock_gettime en POSIX. Es otro reloj, y sus limites no son los mismos en todo: AC_055_13 (test_c_api_song.cpp) afirma contra el periodo con threadCpuNs y en Windows no lo evalua (REQ-061 D13, variante declarada arriba); SongMix.ABurstOfMixSetters... (test_song_mix.cpp) lo afirma solo bajo __OPTIMIZE__, sin variante
+fuera | tests/support/WindowsNotRun.h | if defined(_WIN32) | define WMA_WINDOWS_NOT_RUN: GTEST_SKIP con el marcador en Windows, no-op en el resto (es la macro de este listado)
+
+# --- solo-windows: existen unicamente en Windows (las garantias que POSIX da por la API del SO) ---
+solo-windows | test_wav_dump_windows.cpp | AC-061.4: junction, symlink, reparse point ajeno, no pisar y borrar solo lo creado; en POSIX las dan O_EXCL|O_NOFOLLOW, link(2) y lstat() y las cubre WavSinkTest
+solo-windows | MappedFileTest.AC_061_2_WindowsRefusesTheFdPath | mapFdRegion no existe en Windows: el test fija que falla cerrado
+solo-windows | MappedFileTest.AC_061_2_WindowsLoadFromFdReturnsFalseAndNamesTheReason | idem para loadFromFd
+solo-windows | Utf8PathTest.AC_061_3_WindowsAnInvalidUtf8PathFailsClosed | en POSIX los bytes van tal cual al SO; en Windows se convierten y un UTF-8 invalido no abre nada

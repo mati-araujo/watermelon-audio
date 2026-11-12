@@ -63,7 +63,7 @@ add_executable(libusb_descriptor_tests
 target_link_libraries(libusb_descriptor_tests PRIVATE wma_libusb_host GTest::gtest_main)
 
 include(GoogleTest)
-gtest_discover_tests(libusb_descriptor_tests)
+wma_gtest_discover_tests(libusb_descriptor_tests)
 
 # ============================================================================
 # libusb_backend_lifetime_tests — MINI-042 (M1, D6)
@@ -79,6 +79,17 @@ gtest_discover_tests(libusb_descriptor_tests)
 # por test_platform_backends_libusb.cpp (el downcast real a LibusbBackend).
 # ============================================================================
 set(WMA_LIFETIME_CPP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+# La capa de plataforma: Windows (REQ-061) o POSIX (Linux, macOS: PlatformAndroid.cpp, como siempre).
+if(WIN32)
+    set(WMA_PLATFORM_OS_SOURCES
+        ${WMA_LIFETIME_CPP_ROOT}/platform/PlatformWindows.cpp
+        ${WMA_LIFETIME_CPP_ROOT}/platform/MappedFileWindows.cpp)
+else()
+    set(WMA_PLATFORM_OS_SOURCES
+        ${WMA_LIFETIME_CPP_ROOT}/platform/PlatformAndroid.cpp
+        ${WMA_LIFETIME_CPP_ROOT}/platform/MappedFilePosix.cpp)
+endif()
+
 add_executable(libusb_backend_lifetime_tests
     test_libusb_backend_lifetime.cpp
     test_platform_backends_libusb.cpp
@@ -92,14 +103,14 @@ add_executable(libusb_backend_lifetime_tests
     ${WMA_LIFETIME_CPP_ROOT}/usb/UsbVolumeControl.cpp
     ${WMA_LIFETIME_CPP_ROOT}/usb/AudioFormatConverter.cpp
     ${WMA_LIFETIME_CPP_ROOT}/platform/Logger.cpp
-    ${WMA_LIFETIME_CPP_ROOT}/platform/PlatformAndroid.cpp
+    ${WMA_PLATFORM_OS_SOURCES}
 )
 target_include_directories(libusb_backend_lifetime_tests PRIVATE
     ${WMA_LIFETIME_CPP_ROOT}
     ${WMA_LIFETIME_CPP_ROOT}/core/tests/support
 )
 target_link_libraries(libusb_backend_lifetime_tests PRIVATE wma_libusb_host GTest::gtest_main)
-gtest_discover_tests(libusb_backend_lifetime_tests)
+wma_gtest_discover_tests(libusb_backend_lifetime_tests)
 
 # LibusbBackend.cpp nunca habia pasado por el gate de warnings del host (solo lo
 # compilaba el NDK, sin -Werror) y trae seis variables de diagnostico muertas en

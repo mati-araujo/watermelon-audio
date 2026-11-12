@@ -39,6 +39,13 @@
 #                    queda en .git/config para cualquier paso posterior.
 #   gradle-wrapper   gradle-wrapper.properties declara `distributionSha256Sum`
 #                    (64 hex): el wrapper verifica la distribucion que baja.
+#   windows-cross    el cruce a Windows (REQ-061): el GCC de Homebrew (`mingw_w64_gcc`) y
+#                    `_windows_cross` (MSYS2 UCRT64, imagen del contenedor) de toolchain-pins.json
+#                    tienen la forma esperada (base de la imagen por digest, paquetes con
+#                    version-release, GCC X.Y.Z) y son coherentes (el paquete del compilador es de
+#                    la version de GCC que declara), y NINGUN valor pineado (digest, GCC, paquete,
+#                    formula) aparece escrito en scripts/ ni en un workflow: el Dockerfile los recibe
+#                    por --build-arg desde build-image.sh.
 #   leer             "no pude medir" no es un pase: cero declaraciones de googletest,
 #                    cero `uses:`, cero `java-version:`, un catalogo sin `ndk`, sin
 #                    gradle-wrapper.properties, o un archivo ilegible, son rojos.
@@ -488,6 +495,67 @@ def check_wrapper(root, files, findings):
                                            f"wrapper no verifica la distribucion que baja"))
 
 
+WC_DIGEST = re.compile(r"^[\w./-]+@sha256:[0-9a-f]{64}$")
+WC_GCC = re.compile(r"^\d+\.\d+\.\d+$")
+WC_PACKAGE = re.compile(r"^[\w+.-]+-(\d+:)?\d[\w.~+]*-\d[\w.~+]*$")
+WC_SCAN_EXEMPT = {PINS, "scripts/check-dep-pins.py"}
+
+
+def wc_pinned_values(pins):
+    """(descripcion, literal) de cada valor del cruce que tiene que vivir SOLO en el JSON."""
+    wc = pins["_windows_cross"]
+    brew, msys, cont = wc["homebrew"], wc["msys2_ucrt64"], wc["container"]
+    vals = [("mingw_w64_gcc", pins["mingw_w64_gcc"]),
+            ("homebrew.formula_version", brew["formula_version"]),
+            ("msys2_ucrt64.gcc", msys["gcc"]),
+            ("msys2_ucrt64.package_version", msys["package_version"]),
+            ("container.gcc", cont["gcc"]),
+            ("container.base_image", cont["base_image"].split("@", 1)[-1])]
+    vals += [(f"container.packages[{i}]", p) for i, p in enumerate(cont["packages"])]
+    return vals
+
+
+def check_windows_cross(root, files, findings):
+    pins = json.loads(read(root, PINS))
+    try:
+        vals = wc_pinned_values(pins)
+        cont, msys = pins["_windows_cross"]["container"], pins["_windows_cross"]["msys2_ucrt64"]
+        brew = pins["_windows_cross"]["homebrew"]
+        shape = [
+            (isinstance(pins["mingw_w64_gcc"], str) and WC_GCC.match(pins["mingw_w64_gcc"]), "mingw_w64_gcc no es X.Y.Z"),
+            (WC_GCC.match(msys["gcc"]), "msys2_ucrt64.gcc no es X.Y.Z"),
+            (WC_GCC.match(cont["gcc"]), "container.gcc no es X.Y.Z"),
+            (WC_DIGEST.match(cont["base_image"]), "container.base_image no esta fijada por digest (name@sha256:<64 hex>)"),
+            (cont["packages"] and all(WC_PACKAGE.match(p) for p in cont["packages"]),
+             "container.packages: cada paquete va con version-release (nombre-ver-rel)"),
+            (brew["prefix"] and cont["prefix"] and brew["prefix"] != cont["prefix"],
+             "los prefijos de Homebrew y del contenedor tienen que ser distintos (el pin se busca por prefijo)"),
+            (msys["package_version"].startswith(msys["gcc"] + "-"), "msys2_ucrt64.package_version no es de msys2_ucrt64.gcc"),
+            (any(p.startswith("ucrt64-gcc-c++-" + cont["gcc"] + "-") for p in cont["packages"]),
+             "container.packages no trae ucrt64-gcc-c++ de la version container.gcc"),
+            (any(p.startswith("gcc-c++-" + cont["gcc"] + "-") for p in cont["packages"]),
+             "container.packages no trae el gcc-c++ NATIVO de la version container.gcc (windows-cross compila la suite POSIX con el)"),
+        ]
+    except (KeyError, TypeError, AttributeError) as exc:
+        findings.append(("leer", f"{PINS} no tiene la forma del cruce a Windows ({exc!r}): no pude medir el pin"))
+        return
+    for ok, msg in shape:
+        if not ok:
+            findings.append(("windows-cross", f"{PINS}: {msg}"))
+    for rel in files:
+        if rel in WC_SCAN_EXEMPT or not (rel.startswith("scripts/") or is_workflow(rel)):
+            continue
+        try:
+            text = read(root, rel)
+        except Unreadable:
+            continue  # un binario en scripts/ no declara pins
+        for n, line in enumerate(text.splitlines(), 1):
+            for desc, lit in vals:
+                if re.search(r"(?<![\w.])" + re.escape(lit) + r"(?![\w.])", line):
+                    findings.append(("windows-cross", f"{rel}:{n}: el pin {desc} ({lit}) escrito fuera de {PINS} "
+                                                      f"(el Dockerfile lo recibe por --build-arg): {line.strip()}"))
+
+
 def run_checks(root):
     findings = []
     try:
@@ -499,6 +567,7 @@ def run_checks(root):
         check_actions(root, files, findings)
         check_permissions(root, files, findings)
         check_wrapper(root, files, findings)
+        check_windows_cross(root, files, findings)
     except Unreadable as exc:
         findings.append(("leer", f"ilegible: {exc}"))
         gtest = None
@@ -515,7 +584,8 @@ def main_check(root):
     rel, tag = gtest[0]
     print(f"check-dep-pins: verde — googletest {tag} en {rel}; NDK/CMake sólo en {CATALOG}; "
           f"java-version, Xcode y actions con una sola fuente; permisos declarados, checkouts con "
-          f"escritura sin credenciales persistidas y wrapper con checksum")
+          f"escritura sin credenciales persistidas, wrapper con checksum y el cruce a Windows sólo pineado "
+          f"en {PINS}")
     return 0
 
 
@@ -529,7 +599,17 @@ SUM = "acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a"
 
 CLEAN = {
     CATALOG: '[versions]\nndk = "30.0.16248370"\ncmake = "3.22.1"\n',
-    PINS: json.dumps({"xcode": "26.6 (17F113)", "launcher_jvm": "17.0.19"}),
+    PINS: json.dumps({
+        "xcode": "26.6 (17F113)", "launcher_jvm": "17.0.19", "mingw_w64_gcc": "16.2.0",
+        "_windows_cross": {
+            "homebrew": {"formula_version": "14.0.0_3", "prefix": "x86_64-w64-mingw32-"},
+            "msys2_ucrt64": {"package_version": "16.2.0-4", "gcc": "16.2.0"},
+            "container": {"prefix": "x86_64-w64-mingw32ucrt-", "gcc": "16.2.1",
+                          "base_image": "fedora@sha256:" + "c" * 64,
+                          "packages": ["ucrt64-gcc-c++-16.2.1-1.fc45", "ucrt64-crt-14.0.0-3.fc45", "gcc-c++-16.2.1-3.fc45"]},
+        }}),
+    "scripts/windows-cross/Dockerfile": "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nARG PACKAGES\n",
+    "scripts/windows-cross/build-image.sh": "docker build --build-arg \"BASE_IMAGE=$BASE\" .\n",
     "audio/src/main/cpp/thirdparty/googletest.cmake":
         '# un comentario que nombra FetchContent_Declare(googletest no es una declaracion\n'
         'FetchContent_Declare(googletest\n'
@@ -796,6 +876,23 @@ CASES = [
     ("wrapper con un checksum que no es sha256", mutate(WRAPPER, f"distributionSha256Sum={SUM}",
                                                          f"distributionSha256Sum={SUM[:40]}"), "gradle-wrapper"),
     ("sin gradle-wrapper.properties", remove(WRAPPER), "leer"),
+    # --- REQ-061: el cruce a Windows
+    ("el digest de la imagen repetido en el Dockerfile", mutate(
+        "scripts/windows-cross/Dockerfile", "FROM ${BASE_IMAGE}", "FROM fedora@sha256:" + "c" * 64), "windows-cross"),
+    ("un paquete del contenedor escrito en el Dockerfile", add(
+        "scripts/windows-cross/Dockerfile2", "RUN dnf install -y ucrt64-crt-14.0.0-3.fc45\n"), "windows-cross"),
+    ("el GCC de Homebrew escrito en un script", add("scripts/instalar-mingw.sh", "echo GCC 16.2.0\n"), "windows-cross"),
+    ("el GCC del contenedor escrito en un workflow", mutate(
+        ".github/workflows/publish.yml", "    steps:\n",
+        "    env:\n      CROSS_GCC: 16.2.1\n    steps:\n"), "windows-cross"),
+    ("la base del contenedor por tag y no por digest", mutate(
+        PINS, '"fedora@sha256:' + "c" * 64 + '"', '"fedora:45"'), "windows-cross"),
+    ("el GCC del contenedor no es el del paquete", mutate(PINS, '"gcc": "16.2.1"', '"gcc": "16.2.9"'), "windows-cross"),
+    ("un paquete del contenedor sin version", mutate(
+        PINS, '"ucrt64-crt-14.0.0-3.fc45"', '"ucrt64-crt"'), "windows-cross"),
+    ("el contenedor sin el gcc-c++ nativo", mutate(
+        PINS, ', "gcc-c++-16.2.1-3.fc45"', ''), "windows-cross"),
+    ("toolchain-pins sin el cruce a Windows", mutate(PINS, '"_windows_cross"', '"_otra_cosa"'), "leer"),
     ("uses por tag en una composite action local", add(
         ".github/actions/setup/action.yml",
         "runs:\n  using: composite\n  steps:\n    - uses: actions/setup-java@v5\n"), "actions"),

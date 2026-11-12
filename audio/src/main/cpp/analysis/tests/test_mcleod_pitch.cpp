@@ -735,6 +735,7 @@ TEST(McLeodPitchTest, AC0342_AscentVersusFullRefinementOverTheWholeControlSet) {
                             if (combo++ != par % 8) continue;
 #else
                             (void)combo;
+                            (void)par;
 #endif
                             compare(rate, inharmonicString(cuerda.hz, B, nPart, rate, rate * 2, 0.3, fase), t,
                                     std::string(cuerda.name) + " @" + std::to_string(rate) + " n=" +

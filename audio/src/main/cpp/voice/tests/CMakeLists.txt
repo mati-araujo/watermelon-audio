@@ -44,4 +44,4 @@ target_include_directories(voice_tests PRIVATE
 target_link_libraries(voice_tests PRIVATE watermelon-dsp GTest::gtest_main)
 
 include(GoogleTest)
-gtest_discover_tests(voice_tests)
+wma_gtest_discover_tests(voice_tests)
