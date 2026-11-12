@@ -14,6 +14,8 @@
 #                    el nucleo de libusb vendorizado sobre un backend falso;
 #                    solo se configura desde aca, no standalone)
 #   core_tests     — audio/src/main/cpp/core/tests
+#   core_cost_tests — audio/src/main/cpp/core/tests (MINI-057 D20: el test de costo
+#                    pareado de la compuerta, en su propio ejecutable, todo a -O0)
 #   analysis_tests — audio/src/main/cpp/analysis/tests
 #
 # Prefer the wrapper scripts, which locate a host toolchain (MinGW g++ +

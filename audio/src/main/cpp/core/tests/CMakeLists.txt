@@ -268,9 +268,11 @@ wma_gtest_discover_tests(core_tests)
 # arregla de forma estable. Lo unico que no depende de quien emite la copia es que en el binario que
 # mide NO exista ninguna TU a -O1: el test, tsf, SoundFontManager.cpp y Logger.cpp (lo unico que
 # el link pide) son fuentes DEL TARGET, y el -O0 de target_compile_options va ULTIMO en la linea,
-# despues del WMA_TESTS_OPT de tests/CMakeLists.txt. De la suite a -O1 sólo se linkea
-# watermelon-dsp (.a): no aporta nada de lo medido. El resto de la suite: ubuntu -O1, macOS -O0
-# (D15), TSan -O0 (D6).
+# despues del WMA_TESTS_OPT de tests/CMakeLists.txt. Ninguna libreria del repo se linkea (D25): una
+# dependencia nueva a -O1 falla en el link en vez de mezclar niveles sin aviso. GTest (gtest y
+# gtest_main) SI queda a -O1; no importa porque el test gana el COMDAT por orden de objeto (los
+# objetos del ejecutable van antes que las .a) y gtest no emite nada de lo medido. El resto de la
+# suite: -O1 (TSan -O0, D6).
 add_executable(core_cost_tests
     test_soundfont_effects_send.cpp
     ${WMA_CPP_ROOT}/engines/SoundFontManager.cpp
@@ -288,7 +290,6 @@ target_include_directories(core_cost_tests PRIVATE
     ${WMA_CPP_ROOT}/thirdparty/tinysoundfont
 )
 target_link_libraries(core_cost_tests PRIVATE
-    watermelon-dsp
     GTest::gtest_main
     Threads::Threads
 )
