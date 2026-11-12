@@ -147,7 +147,7 @@ jobs:
   # build + ctest pass driven by scripts/run-cpp-tests.sh.
   cpp-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # peor medido: 13.4 min
+    timeout-minutes: 30  # peor medido: 8.0 min (run 43206186559, 5 intentos, 2026-11-12)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -347,7 +347,7 @@ jobs:
   # teardown path — the highest-risk code as the driver plan gains new logic.
   cpp-tests-asan:
     runs-on: ubuntu-latest
-    timeout-minutes: 25  # peor medido: 6.6 min
+    timeout-minutes: 25  # peor medido: 16.5 min (run 43206186559, 5 intentos, 2026-11-12)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -390,7 +390,7 @@ jobs:
   # handoff are the #1 candidates for latent data races.
   cpp-tests-tsan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # peor medido: 10.6 min
+    timeout-minutes: 30  # peor medido: 26.6 min (run 43206186559, 5 intentos, 2026-11-12)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -462,7 +462,7 @@ jobs:
   # ubuntu, y un include prohibido es igual de rojo dicho por Linux.
   cpp-tests-macos:
     runs-on: macos-latest
-    timeout-minutes: 20  # peor medido: 4.3 min
+    timeout-minutes: 20  # peor medido: 9.7 min (base a -O0, run 43023912835; el MINI a -O1 fue 7.7 min, 462 s, pero macOS vuelve a -O0, MINI-057 D23)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
