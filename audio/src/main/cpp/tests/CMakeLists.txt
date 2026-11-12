@@ -107,7 +107,7 @@ endif()
 # check-windows-not-run --results) y techos de tiempo de pared que nadie midio en Windows. El
 # ahorro de tiempo en Windows no es objetivo del MINI. WIN32 vale con el toolchain cruzado
 # (CMAKE_SYSTEM_NAME Windows, windows-cross) y con el configure nativo de run-cpp-tests.ps1 en MSYS2.
-# Un solo lugar que heredan el job cpp-tests-macos del CI y gate.sh (via run-cpp-tests.sh).
+# Este es el punto unico: lo heredan todos los configures (sh, ps1, CI, gate.sh).
 # WMA_TESTS_OPT vacio = automatico; un valor explicito siempre manda.
 set(WMA_TESTS_OPT "" CACHE STRING
     "Optimization flag for the host test suite; empty = auto (-O1; -O0 under TSan and on Windows)")
