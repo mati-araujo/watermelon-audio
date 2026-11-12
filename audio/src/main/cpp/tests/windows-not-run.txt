@@ -27,7 +27,7 @@ variante | SongApi.AC_055_13_ABurstOfPublicationsAgainstTheCallbackAllocatesNoth
 
 # --- ambiente: skips que dependen de lo que hay instalado o del build, no de la plataforma ---
 ambiente | ERROR_PRIVILEGE_NOT_HELD: crear symlinks | crear un symlink pide modo desarrollador o SeCreateSymbolicLinkPrivilege; la junction y el reparse point ajeno (sin privilegio) cubren lo mismo
-ambiente | el costo se mide en un build optimizado | tests de costo: la suite del gate es Debug (igual en POSIX)
+ambiente | el costo se mide en un build optimizado | en Windows la suite es -O0 (MINI-057 D29) y estos tests de costo saltean; en ubuntu/macOS (-O1) corren
 ambiente | golden de 2.23.0 capturado en macOS arm64 | ver la variante OutputProfiles.ProtectedIsTheTwoTwentyThreeOutputBitForBit
 ambiente | medicion a pedido: WMA_MEASURE_OFFLINE_MEMORY=1 | medicion a pedido, apagada por defecto en todas las plataformas
 ambiente | sin AC4_OUT_DIR | herramienta que escribe WAV solo si se le da un directorio

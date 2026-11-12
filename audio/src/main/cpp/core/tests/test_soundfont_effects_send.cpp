@@ -632,7 +632,7 @@ TEST(SoundFontEffectsSendEngine, TheUnitsCostLessThanTheVoicesAndTheGateAFractio
     //     lado y el otro no. Hacen falta todas las TUs del target, no sólo esta: reverb y chorus son
     //     `inline` y, en un ejecutable con TUs a -O1, la copia que gana el link puede ser la
     //     optimizada. A -O1 la compuerta daba 3,45x (Apple clang 21) y 3,66x (GCC 15.2, un
-    //     intento). El resto de la suite: -O1 (TSan -O0, D6). Lo que un
+    //     intento). El resto de la suite: -O1 (TSan -O0, D6; Windows -O0, D29). Lo que un
     //     1,5x deja pasar es una compuerta un 50 % mas cara que el barrido que envuelve, que ya
     //     es un defecto de la compuerta y no ruido.
     //
