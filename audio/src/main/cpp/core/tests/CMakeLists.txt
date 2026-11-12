@@ -270,9 +270,9 @@ wma_gtest_discover_tests(core_tests)
 # el link pide) son fuentes DEL TARGET, y el -O0 de target_compile_options va ULTIMO en la linea,
 # despues del WMA_TESTS_OPT de tests/CMakeLists.txt. Ninguna libreria del repo se linkea (D25): una
 # dependencia nueva a -O1 falla en el link en vez de mezclar niveles sin aviso. GTest (gtest y
-# gtest_main) SI queda al nivel de la suite (-O1; -O0 en TSan y Windows, D29); no importa porque el test gana el COMDAT por orden de objeto (los
+# gtest_main) SI queda al nivel de la suite (-O1; -O0 en TSan, Windows D29 y macOS D23); no importa porque el test gana el COMDAT por orden de objeto (los
 # objetos del ejecutable van antes que las .a) y gtest no emite nada de lo medido. El resto de la
-# suite: -O1 (TSan -O0, D6; Windows -O0, D29).
+# suite: -O1 (TSan -O0, D6; Windows -O0, D29; macOS -O0, D23).
 add_executable(core_cost_tests
     test_soundfont_effects_send.cpp
     ${WMA_CPP_ROOT}/engines/SoundFontManager.cpp
