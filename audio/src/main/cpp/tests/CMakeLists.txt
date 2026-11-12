@@ -101,13 +101,21 @@ endif()
 # GCC 15.2.0, 5 corridas): a -O1 GCC expande en linea el memcpy del payload del anillo SPSC
 # y esos accesos no llegan a TSan; una carrera sembrada en LockFreeRingBuffer da 0/5 a -O1
 # y 5/5 a -O0. ASan y UBSan sí ven sus mutaciones 5/5 a -O1 y se quedan en -O1.
+# Excepcion declarada (MINI-057 D29): Windows (MinGW) tambien compila a -O0, identico a master.
+# La suite de Windows no se puede verificar desde la maquina de desarrollo (App Control bloquea
+# los .exe locales) y a -O1 se activarian skips por __OPTIMIZE__ (tests/windows-not-run.txt,
+# check-windows-not-run --results) y techos de tiempo de pared que nadie midio en Windows. El
+# ahorro de tiempo en Windows no es objetivo del MINI. WIN32 vale con el toolchain cruzado
+# (CMAKE_SYSTEM_NAME Windows, windows-cross) y con el configure nativo de run-cpp-tests.ps1 en MSYS2.
 # Un solo lugar que heredan el job cpp-tests-macos del CI y gate.sh (via run-cpp-tests.sh).
 # WMA_TESTS_OPT vacio = automatico; un valor explicito siempre manda.
 set(WMA_TESTS_OPT "" CACHE STRING
-    "Optimization flag for the host test suite; empty = auto (-O1; -O0 under TSan)")
+    "Optimization flag for the host test suite; empty = auto (-O1; -O0 under TSan and on Windows)")
 if(WMA_TESTS_OPT)
     set(WMA_TESTS_OPT_EFFECTIVE "${WMA_TESTS_OPT}")
 elseif(WMA_TESTS_SANITIZE MATCHES "thread")
+    set(WMA_TESTS_OPT_EFFECTIVE "-O0")
+elseif(WIN32)
     set(WMA_TESTS_OPT_EFFECTIVE "-O0")
 else()
     set(WMA_TESTS_OPT_EFFECTIVE "-O1")
