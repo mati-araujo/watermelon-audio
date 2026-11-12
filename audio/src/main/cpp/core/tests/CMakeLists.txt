@@ -292,7 +292,7 @@ target_link_libraries(core_cost_tests PRIVATE
     GTest::gtest_main
     Threads::Threads
 )
-gtest_discover_tests(core_cost_tests)
+wma_gtest_discover_tests(core_cost_tests)
 
 # REQ-040, criterio de muerte (I-2): el render de host que produce el Δ_host = 1/1 − 0/0 por
 # preset. EXCLUDE_FROM_ALL a proposito: no es un test, no lo construye el gate ni el CI, y no
