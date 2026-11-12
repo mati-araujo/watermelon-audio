@@ -59,7 +59,7 @@ camino critico de un PR atestado (`local_first.md` §2).
     `sleepFixed` detras de una condicion que a escala 1 no se cumple escapa a la traza en el PR;
     lo cubre sólo el barrido completo de master. Quien lo agregue asi rompe el atajo a sabiendas.
   - Windows (D22): `run-cpp-tests.ps1` NO exporta `WMA_TEST_WAIT_TRACE` ni escribe MANIFEST (el detector no corre alli),
-    asi que `sleepFixed` no escribe nada; el MINI es dueno de que la suite compile limpia con `-O1` bajo MinGW (`windows-cross`); la suite de Windows corre a `-O0` (D29), asi que ese `-O1` es sólo de compilacion.
+    asi que `sleepFixed` no escribe nada; Windows compila y corre a `-O0` (D29); MinGW a `-O1` se midio una sola vez en D22 (0 warnings en 262 TUs y la DLL) y ningun gate lo cubre hoy (seguimiento de D29).
 - `check-cpp-portability.sh` (WA-0.4, REQ-061 AC-061.7): regla 1, `jni.h` / `android/` fuera de su capa; regla 2, una API
   sólo-POSIX o sólo-Windows fuera de su capa (`platform/`, el backend de su plataforma, `usb/`, `jni/`), por header Y por
   SÍMBOLO suelto medido (`lstat`, `link(`, `O_NOFOLLOW`...: viven en headers que MinGW sí tiene, así que un lint de headers no

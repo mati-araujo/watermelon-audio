@@ -354,7 +354,7 @@ Dos consecuencias que conviene tener escritas:
    es **bajar `CTEST_JOBS`**, nunca subir el techo: el presupuesto que importa es el de los
    sanitizers.
 
-> Los tiempos de §7.13 son de la suite de 883 tests a `-O0`. Hoy son 2238 y todo compila a `-O1`
+> Los tiempos de §7.13 son de la suite de 883 tests a `-O0`. Hoy todo compila a `-O1`
 > salvo TSan (D6), Windows (D29) y macOS (D23) (§7.14); no los uses como presupuesto.
 
 ### 7.14 Suite a -O1 y detector por traza (MINI-057)
@@ -363,7 +363,7 @@ Con los tres jobs de ubuntu como camino crítico entero (§2), el más lento —
 1621 s contra un `timeout-minutes: 30`. Dos costos daban cuenta de la mayor parte y ninguno
 protegía nada:
 
-1. `check-time-dependence.sh` re-corría las 2238 pruebas **en serie** (≈ 1000 s), aunque sólo las
+1. `check-time-dependence.sh` re-corría todas las pruebas **en serie** (≈ 1000 s), aunque sólo las
    que llaman a `wma_test::sleepFixed` pueden cambiar de veredicto.
 2. La suite de host compilaba a **`-O0`**, y los tests que miden DSP pagan entre 4 y 12 veces lo
    que cuestan optimizados.
@@ -383,17 +383,17 @@ qué: `audio/src/main/cpp/CLAUDE.md`.
 | `cpp-tests-asan` | 1159 s | 315 s | 826 s | |
 
 **Primera medición a `-O1`** (run 42928259678, rama descartable, `-Wno-error` sólo ahí, detector
-todavía en serie, TSan todavía a `-O1`; 2238 tests):
+todavía en serie, TSan todavía a `-O1`):
 
 | job | total | build | ctest | detector (serie) | ctest |
 |---|---|---|---|---|---|
-| `cpp-tests` | 738 s | ≈226 s | 129 s | 357 s | 2238/2238 |
-| `cpp-tests-asan` | 769 s | ≈458 s | 303 s | — | 2238/2238 |
-| `cpp-tests-tsan` | 692 s | ≈237 s | 447 s | — | 2238/2238 |
-| `cpp-tests-macos` | 402 s | ≈214 s | 167 s | — | 1 rojo de 2238 |
+| `cpp-tests` | 738 s | ≈226 s | 129 s | 357 s | verde |
+| `cpp-tests-asan` | 769 s | ≈458 s | 303 s | — | verde |
+| `cpp-tests-tsan` | 692 s | ≈237 s | 447 s | — | verde |
+| `cpp-tests-macos` | 402 s | ≈214 s | 167 s | — | 1 rojo |
 
 El rojo de macOS (costo pareado de la compuerta, 3,45x contra techo 1,5x) no cedió dejando esa TU
-a `-O0` (la compuerta pasó, pero falló el otro techo: unidades 5,05x–5,18x contra 3,0, run 42950016735; el test necesita un nivel uniforme en todo el grafo): la suite de macOS (Apple clang) quedó a `-O0` (D15; aislar el test en `core_cost_tests`, D20, sacó ese motivo, pero macOS sigue a `-O0` por otro, D23: ver la tabla final). La fila de TSan ya no describe el estado final: TSan quedó a `-O0` (D6), así que su
+a `-O0` (la compuerta pasó, pero falló el otro techo: unidades ~5,1x contra 3,0, run 42950016735, macOS; el test necesita un nivel uniforme en todo el grafo): la suite de macOS (Apple clang) quedó a `-O0` (D15; aislar el test en `core_cost_tests`, D20, sacó ese motivo, pero macOS sigue a `-O0` por otro, D23: ver la tabla final). La fila de TSan ya no describe el estado final: TSan quedó a `-O0` (D6), así que su
 tiempo vuelve a subir. Tampoco alcanzó en ubuntu: con GCC 15.2 a `-O1` la compuerta dio 3,66x contra 1,5x en un intento (run 42971401043), así que el test pasó a su propio ejecutable, `core_cost_tests`, todo a `-O0` en todas las plataformas, y `core_tests` sigue a `-O1` (D20). Un `-O0` por archivo dentro de `core_tests` (D17) no alcanzó: reverb y chorus son `inline`, otras TUs a `-O1` emiten su copia COMDAT y el link se queda con la primera (unidades/tsf 0,32x–0,39x contra ~1,08x en master). El build sale unas 2,7 veces más caro (38 s → 103 s en `analysis_tests` +
 `effects_tests`, 12 núcleos) y el ctest baja a la mitad o menos; los timeouts no se tocaron.
 
@@ -659,5 +659,5 @@ simulador iPhone 17 / iOS 26.4 ya booteado, árbol ya construido (pasada increme
 caso real al preparar un PR). Los dos runs de sanitizer son la excepción: `run-cpp-tests.sh`
 hace `rm -rf` de `build-san`, así que **siempre** reconstruyen desde cero.
 
-> Las filas de ASan+UBSan y TSan son anteriores a MINI-057: se midieron a `-O0`. ASan+UBSan compila
-> hoy a `-O1`; TSan sigue a `-O0` (D6), y Windows (D29) y macOS (D23) también (§7.14).
+> Las filas de ASan+UBSan y TSan son anteriores a MINI-057: se midieron a `-O0`. ASan+UBSan va a
+> `-O1` en Linux (GCC); en macOS toda la suite, sanitizers incluidos, va a `-O0` (D23), así que las corridas locales de macOS de esta tabla son `-O0`. TSan sigue a `-O0` (D6), y Windows (D29) también (§7.14).

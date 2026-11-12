@@ -147,7 +147,7 @@ jobs:
   # build + ctest pass driven by scripts/run-cpp-tests.sh.
   cpp-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # peor medido: 8.0 min (run 43206186559, 5 intentos, 2026-11-12)
+    timeout-minutes: 30  # peor medido: 8.0 min (run 43206186559, 5 intentos, 2026-11-12; en modo PR, detector con traza: en push a master corre --full y ese camino no se midio)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -390,7 +390,7 @@ jobs:
   # handoff are the #1 candidates for latent data races.
   cpp-tests-tsan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # peor medido: 26.6 min (run 43206186559, 5 intentos, 2026-11-12)
+    timeout-minutes: 30  # peor medido: 26.6 min (run 43206186559, 5 intentos, 2026-11-12); la base con la misma configuracion (TSan -O0 en los dos lados) llego a 1738 s = 29.0 min (run 43023912835, sobre d581137) y el MINI suma ~40 s de build; el peor del MINI sigue siendo 26.6 min
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:

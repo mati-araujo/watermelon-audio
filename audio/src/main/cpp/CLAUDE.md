@@ -66,7 +66,7 @@ callback violaba estas reglas en **65 lugares**, y dos sobrevivian a `NDEBUG` po
 - La suite compila a **`-O1 -g` con asserts vivos** (`Debug`, sin `NDEBUG`), por `WMA_TESTS_OPT` en
   `tests/CMakeLists.txt`: vacio = automatico, `-DWMA_TESTS_OPT=-O0` para depurar, un valor
   explicito siempre manda. A `-O0` los tests que miden DSP pagaban 4 a 12 veces el costo
-  optimizado. Quedan a `-O1` ubuntu (GCC) y ASan/UBSan. Excepciones declaradas y MEDIDAS (viven en el mismo `if` de
+  optimizado. Quedan a `-O1` en Linux (GCC), ASan/UBSan incluidos; en macOS toda la suite, sanitizers incluidos, va a `-O0` (D23). Excepciones declaradas y MEDIDAS (viven en el mismo `if` de
   `tests/CMakeLists.txt`), no las "arregles" subiendo el nivel:
   - **Windows (MinGW) a `-O0`** (D29): la suite no se puede verificar desde la PC de desarrollo (App Control bloquea
     los `.exe`) y a `-O1` activaria skips por `__OPTIMIZE__` (`tests/windows-not-run.txt`) y techos de pared sin
@@ -83,7 +83,7 @@ callback violaba estas reglas en **65 lugares**, y dos sobrevivian a `NDEBUG` po
     todas las plataformas** (D20): `core/tests/test_soundfont_effects_send.cpp` + `tsf_impl.cpp` +
     `SoundFontManager.cpp` + `Logger.cpp` son fuentes del target y `target_compile_options(-O0)` va
     ULTIMO en la linea (`core/tests/CMakeLists.txt`); ninguna libreria del repo se linkea (D25: una
-    dependencia nueva a `-O1` falla en el link); gtest sí queda a `-O1`, y el test gana el COMDAT por orden de objeto. Motivo: con GCC 15.2 a `-O1` la compuerta dio 3,66x contra 1,5x en un
+    dependencia nueva a `-O1` falla en el link); gtest queda al nivel de la suite (`-O1` en Linux; `-O0` en TSan, Windows y macOS), y el test gana el COMDAT por orden de objeto. Motivo: con GCC 15.2 a `-O1` la compuerta dio 3,66x contra 1,5x en un
     intento (run 42971401043), y un `-O0` por archivo dentro de `core_tests` (D17, revertido) no
     alcanza: reverb y chorus son `inline`, otras TUs a `-O1` del mismo ejecutable emiten su copia
     COMDAT y GNU ld se queda con la primera (unidades/tsf 0,32x–0,39x contra ~1,08x). La excepcion de macOS de D15 (para este test) salió porque el test corre aislado a `-O0`; macOS volvió a `-O0` por otro test (D23, arriba). No mezcles
