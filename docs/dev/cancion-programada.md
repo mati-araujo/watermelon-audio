@@ -128,7 +128,7 @@ siendo el de la agenda vieja hasta la adopcion.
   bit-identica entre bloques de 32/64/128.
 - Rafaga de 1000 publicaciones de 1024 secciones contra el callback (256 frames, periodo 5333 us):
   0 allocations en el hilo RT, 0 agendas desgarradas, 1000 adopciones, max CPU por callback
-  ~200 us. Se corre tambien bajo TSan (el tiempo solo se afirma sin sanitizers).
+  ~200 us. Se corre tambien bajo TSan (el tiempo solo se afirma sin sanitizers, y sobre el p99).
 
 ## Pendiente fuera de esta etapa
 
