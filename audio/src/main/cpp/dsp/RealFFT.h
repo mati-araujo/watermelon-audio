@@ -11,7 +11,8 @@
  * X[n/2] son reales y comparten el primer par. X[k] = Σ x[i]·e^(-2πi·k·i/n), sin escalar; la
  * inversa divide por n, asi que inversa(directa(x)) = x.
  *
- * El constructor y el destructor alocan y liberan: thread de control. Las transformadas no
+ * El constructor y el destructor alocan y liberan: thread de control. Sin memoria para los buffers,
+ * `valid()` es false; pffft no chequea la de su plan, y ahi la falta de memoria es un crash. Las transformadas no
  * alocan, no bloquean y no loguean. El scratch es de la instancia: una instancia, un thread.
  */
 class RealFFT {

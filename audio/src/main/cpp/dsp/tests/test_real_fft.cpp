@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <complex>
@@ -23,24 +24,26 @@
 #if defined(WMA_WRAP_MALLOC)
 // RtAllocCounter no ve `malloc` y pffft es C: `--wrap` cuenta las llamadas de todo lo que se
 // linkea en este binario. Sin `--wrap` (Apple ld) queda solo el contador de `operator new`.
+// Atomicos y NO thread_local: en MinGW estatico un thread_local pasa por __emutls_get_address,
+// que llama a calloc, o sea al wrapper, sin fin. El test es de un hilo.
 namespace {
-thread_local bool tMallocArmed = false;
-thread_local int64_t tMallocCount = 0;
+std::atomic<bool> gMallocArmed{false};
+std::atomic<int64_t> gMallocCount{0};
 }  // namespace
 extern "C" {
 void* __real_malloc(std::size_t);
 void* __real_calloc(std::size_t, std::size_t);
 void* __real_realloc(void*, std::size_t);
 void* __wrap_malloc(std::size_t n) {
-    if (tMallocArmed) ++tMallocCount;
+    if (gMallocArmed) ++gMallocCount;
     return __real_malloc(n);
 }
 void* __wrap_calloc(std::size_t n, std::size_t m) {
-    if (tMallocArmed) ++tMallocCount;
+    if (gMallocArmed) ++gMallocCount;
     return __real_calloc(n, m);
 }
 void* __wrap_realloc(void* p, std::size_t n) {
-    if (tMallocArmed) ++tMallocCount;
+    if (gMallocArmed) ++gMallocCount;
     return __real_realloc(p, n);
 }
 }
@@ -178,13 +181,13 @@ TEST(RealFFT, TransformsDoNotAllocate) {
     { std::vector<float> probe(16); ASSERT_NE(probe.data(), nullptr); }
     ASSERT_GE(wma_test::disarmAllocCounter(), 1);
 #if defined(WMA_WRAP_MALLOC)
-    tMallocCount = 0;
-    tMallocArmed = true;
+    gMallocCount = 0;
+    gMallocArmed = true;
     const bool probeValid = RealFFT(256).valid();
-    tMallocArmed = false;
+    gMallocArmed = false;
     ASSERT_TRUE(probeValid);
     // pffft_new_setup (2) y los buffers alineados (3).
-    ASSERT_GE(tMallocCount, 5) << "el contador de malloc no ve a pffft";
+    ASSERT_GE(gMallocCount.load(), 5) << "el contador de malloc no ve a pffft";
 #endif
 
     for (int n : kSizes) {
@@ -195,16 +198,16 @@ TEST(RealFFT, TransformsDoNotAllocate) {
         bool ok = true;
         wma_test::armAllocCounter();
 #if defined(WMA_WRAP_MALLOC)
-        tMallocCount = 0;
-        tMallocArmed = true;
+        gMallocCount = 0;
+        gMallocArmed = true;
 #endif
         for (int i = 0; i < 4; ++i) {
             ok = fft.transformForward(x.data(), s.data()) && ok;
             ok = fft.transformInverse(s.data(), y.data()) && ok;
         }
 #if defined(WMA_WRAP_MALLOC)
-        tMallocArmed = false;
-        EXPECT_EQ(tMallocCount, 0) << n;
+        gMallocArmed = false;
+        EXPECT_EQ(gMallocCount.load(), 0) << n;
 #endif
         EXPECT_EQ(wma_test::disarmAllocCounter(), 0) << n;
         EXPECT_TRUE(ok) << n;

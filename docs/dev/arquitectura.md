@@ -37,7 +37,7 @@ audio/src/
                         proceso y los tests de ausencia necesitan uno virgen
   main/cpp/             C++20 engine
     api/                C API — watermelon_audio.h (274 declaraciones WMA_API, pure C)
-    dsp/                watermelon-dsp sub-library (30 files, zero deps)
+    dsp/                watermelon-dsp sub-library (sin dependencias salvo pffft, detras de RealFFT)
     effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
     engines/            watermelon-engines sub-library (SynthEngine + 6 engines
                         header-only, SoundFontManager)

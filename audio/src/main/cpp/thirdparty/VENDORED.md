@@ -68,10 +68,12 @@ son nuestros (como se compila / extensiones), no parte de lo vendorizado.
 | Que entro | sólo la FFT `float`: `LICENSE.txt`, `include/pffft/pffft.h`, `src/pffft.c`, `src/pffft_common.c`, `src/pffft_priv_impl.h` y, de `src/simd/`, los `pf_*float.h` y `pf_fma_x86.h` (14 archivos). Afuera: `double`, `pffft.hpp`, fastconv, mixers, `sse2neon.h`, benchmarks y tests |
 | Como se verifico | `gh api 'repos/marton78/pffft/git/trees/<commit>?recursive=1'`: el sha de blob de cada archivo vs `git hash-object --no-filters`. Contra un clon en ese commit: `diff -r --strip-trailing-cr <clon> audio/src/main/cpp/thirdparty/pffft`, que sólo da lineas `Only in <clon>` |
 | Modificado localmente | ninguno, byte a byte igual al commit |
-| Licencia | FFTPACKv5 de UCAR, tipo BSD (`pffft/LICENSE.txt`). Pide reproducir el aviso en lo que acompaña al binario: esta en `NOTICE` |
+| Licencia | FFTPACKv5 de UCAR, tipo BSD (`pffft/LICENSE.txt`). Pide reproducir el aviso en lo que acompaña al binario: el texto esta en `NOTICE`, que hoy **ningun build empaqueta** en el AAR ni en los klib (igual que el de libusb y TinySoundFont) |
 | Uso | sólo `dsp/RealFFT.cpp`. Con `PFFFT_STATIC_DEFINE` (lo pone `pffft.cmake`): sin el, el header declara `dllimport` en Windows |
 | Entro por | MINI-058 |
+| CVEs | `curl -s 'https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=pffft'` (0 el 2026-11-25) |
 
+## googletest (no vendorizado)
 
 Lo baja CMake con `FetchContent` para la suite de host. Version **v1.18.0**, commit
 `063de7e9578f82b369302001269680b4b1553359` (2026-08-10; `gh api repos/google/googletest/git/ref/tags/v1.18.0 --jq .object`,
@@ -94,7 +96,7 @@ Oboe no va aca: es una dependencia Maven y Dependabot la ve.
 
 1. **Cuando**: antes de cada release y cuando Dependabot abre su PR mensual.
 2. Por cada dependencia de arriba, correr su consulta de NVD (`keywordSearch=<nombre>` o `cveId=<id>`). NVD rate-limitea sin API key: dejar ~6 s entre requests (con esa pausa no hubo rechazos).
-3. Consultar tambien OSV por commit: `curl -s https://api.osv.dev/v1/query -d '{"commit":"<sha>"}'`. Hoy devuelve `{}` para libusb, TinySoundFont, tml.h y googletest; para el commit de stb devuelve un ruido de `stb_image` (OSV-2020-1372), no de vorbis. **`{}` no es "limpio"**: OSV no conoce todo (ver 🔴 arriba).
+3. Consultar tambien OSV por commit: `curl -s https://api.osv.dev/v1/query -d '{"commit":"<sha>"}'`. Hoy devuelve `{}` para libusb, TinySoundFont, tml.h, pffft y googletest; para el commit de stb devuelve un ruido de `stb_image` (OSV-2020-1372), no de vorbis. **`{}` no es "limpio"**: OSV no conoce todo (ver 🔴 arriba).
 4. Si aparece un CVE alcanzable: abrir un REQ o MINI **con un test de reproduccion** (un `.sf2`/`.sf3` hostil, un descriptor USB); el arreglo va con su test rojo primero.
 5. Si el arreglo es un bump upstream: re-vendorizar desde el tag/commit, recorrer el `diff` de esta tabla y actualizar la fila (version, commit, fecha, resultado del `diff`) en el mismo PR.
 6. Si upstream no arregla (stb_vorbis, TinySoundFont): el parche es nuestro y se lista en la fila con su commit.
