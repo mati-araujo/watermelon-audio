@@ -41,6 +41,7 @@ Detalle por archivo y su historia: `docs/dev/arquitectura.md`.
 | Min SDK | 29      |
 | Compile SDK | 37      |
 | kotlinx-coroutines | 1.11.0  |
+| pffft (FFT, detras de `dsp/RealFFT.h`) | ver `thirdparty/VENDORED.md` |
 | TinySoundFont | 0.9, **fork** (ver `thirdparty/VENDORED.md`) |
 | iOS deployment target | 15.0    |
 | googletest (suite de host) | ver `audio/src/main/cpp/thirdparty/googletest.cmake` |

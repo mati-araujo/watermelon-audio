@@ -1,8 +1,8 @@
 # Inventario de lo vendorizado
 
 Este archivo **se mantiene a mano**. Un bump de cualquier cosa vendorizada actualiza su fila
-**en el mismo PR**. Todo lo de abajo se midio el 2026-09-30 con el comando que figura al lado;
-`libusb.cmake`, `tinysoundfont.cmake`, `tinymidiloader.cmake`, `tsf_ext.h` y `tsf_impl.cpp`
+**en el mismo PR**. Todo lo de abajo se midio el 2026-09-30 con el comando que figura al lado (pffft, el 2026-11-25);
+`libusb.cmake`, `tinysoundfont.cmake`, `tinymidiloader.cmake`, `pffft.cmake`, `tsf_ext.h` y `tsf_impl.cpp`
 son nuestros (como se compila / extensiones), no parte de lo vendorizado.
 
 ## libusb
@@ -58,7 +58,20 @@ son nuestros (como se compila / extensiones), no parte de lo vendorizado.
 | Uso | **solo tests** (`core/tests/CMakeLists.txt`, `MidiSpecHarness.h`, `tml_impl.cpp`); `git grep -n 'tml.h\|tinymidiloader' -- . ':!audio/src/main/cpp/thirdparty'`. No entra al artefacto publicado |
 | CVEs | `keywordSearch=TinySoundFont` en NVD (0 hoy, y 0 con `keywordSearch=TinyMidiLoader`) |
 
-## googletest (no vendorizado)
+## pffft (`pffft/`)
+
+| | |
+|---|---|
+| Version | 1.3.1 (tag `v1.3.1`, anotado) |
+| Upstream | https://github.com/marton78/pffft (fork mantenido del de Julien Pommier) |
+| Commit | `fbe9c2b96530ce274f12e008336a8202e15b859b` (2026-11-20) |
+| Que entro | sólo la FFT `float`: `LICENSE.txt`, `include/pffft/pffft.h`, `src/pffft.c`, `src/pffft_common.c`, `src/pffft_priv_impl.h` y, de `src/simd/`, los `pf_*float.h` y `pf_fma_x86.h` (14 archivos). Afuera: `double`, `pffft.hpp`, fastconv, mixers, `sse2neon.h`, benchmarks y tests |
+| Como se verifico | `gh api 'repos/marton78/pffft/git/trees/<commit>?recursive=1'`: el sha de blob de cada archivo vs `git hash-object --no-filters`. Contra un clon en ese commit: `diff -r --strip-trailing-cr <clon> audio/src/main/cpp/thirdparty/pffft`, que sólo da lineas `Only in <clon>` |
+| Modificado localmente | ninguno, byte a byte igual al commit |
+| Licencia | FFTPACKv5 de UCAR, tipo BSD (`pffft/LICENSE.txt`). Pide reproducir el aviso en lo que acompaña al binario: esta en `NOTICE` |
+| Uso | sólo `dsp/RealFFT.cpp`. Con `PFFFT_STATIC_DEFINE` (lo pone `pffft.cmake`): sin el, el header declara `dllimport` en Windows |
+| Entro por | MINI-058 |
+
 
 Lo baja CMake con `FetchContent` para la suite de host. Version **v1.18.0**, commit
 `063de7e9578f82b369302001269680b4b1553359` (2026-08-10; `gh api repos/google/googletest/git/ref/tags/v1.18.0 --jq .object`,
