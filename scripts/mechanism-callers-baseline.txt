@@ -188,3 +188,6 @@ audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::isSongBusLive::sonda-de-te
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::setSongBusTailMaxSecondsForTest::sonda-de-tests | acorta el tope de la cola del bus (600 s) para que los tests de tope no simulen 10 min bajo sanitizers
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::getSongBusOverflowBlocks::sonda-de-tests | contador RT de bloques mas grandes que el bus «Espacio»: el test afirma 0 bajo una rafaga de setters (el bus no se salta bloques en silencio)
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::getSongMixTrackGain::sonda-de-tests | accesor de la ganancia de mezcla de la cancion: el test de la C API afirma que un valor rechazado no se aplico
+audio/src/main/cpp/dsp/RealFFT.cpp::RealFFT::RealFFT::deuda | sin llamador hasta REQ-068 S1 (MINI-058: la FFT real unica del motor entra antes que su primer consumidor)
+audio/src/main/cpp/dsp/RealFFT.cpp::RealFFT::transformForward::deuda | sin llamador hasta REQ-068 S1 (MINI-058: la FFT real unica del motor entra antes que su primer consumidor)
+audio/src/main/cpp/dsp/RealFFT.cpp::RealFFT::transformInverse::deuda | sin llamador hasta REQ-068 S1 (MINI-058: la FFT real unica del motor entra antes que su primer consumidor)
