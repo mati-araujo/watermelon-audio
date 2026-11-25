@@ -42,7 +42,7 @@
       "formula_version": "14.0.0_3",
       "prefix": "x86_64-w64-mingw32-",
       "gcc_key": "mingw_w64_gcc",
-      "verificado_en": "mac (pendiente: sólo se midio el equivalente UCRT64 de MSYS2 y el contenedor)"
+      "verificado_en": "mac, 2026-11-25: mingw-w64 14.0.0_3 con GCC 16.2.0; windows-cross verde en gate.sh"
     },
     "msys2_ucrt64": {
       "root": "C:/msys64/ucrt64",
