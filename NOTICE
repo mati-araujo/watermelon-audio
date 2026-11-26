@@ -44,6 +44,11 @@ Copyright (c) 2020  Dario Mambro ( dario.mambro@gmail.com )
 Copyright (c) 2019  Hayati Ayguen ( h_ayguen@web.de )
 Copyright (c) 2013  Julien Pommier ( pommier@modartt.com )
 
+Some SIMD headers (src/simd/, macro-only, preprocessed in every build)
+add their own holders under the same terms:
+Copyright (c) 2026  Marton Danoczy ( marton78@gmail.com ) - pf_wasm_float.h, pf_helium_float.h
+Copyright (c) 2026  Michael Neuling ( mikey@neuling.org ) - pf_rvv_float.h
+
 Copyright (c) 2004 the University Corporation for Atmospheric
 Research ("UCAR"). All rights reserved. Developed by NCAR's
 Computational and Information Systems Laboratory, UCAR,
@@ -77,7 +82,41 @@ ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS WITH THE
 SOFTWARE.
 
+src/simd/pf_fma_x86.h (macro-only, included in every build) carries its own notice:
+
+Copyright (c) 2024  hayguen@web.de
+Copyright (c) 2013  Julien Pommier ( pommier@modartt.com )
+
+Redistribution and use of the Software in source and binary forms,
+with or without modification, is permitted provided that the
+following conditions are met:
+
+- Neither the names of PFFFT, nor the names of its
+sponsors or contributors may be used to endorse or promote products
+derived from this Software without specific prior written permission.
+
+- Redistributions of source code must retain the above copyright
+notices, this list of conditions, and the disclaimer below.
+
+- Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions, and the disclaimer below in the
+documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
+THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
 See: audio/src/main/cpp/thirdparty/pffft/LICENSE.txt
+and audio/src/main/cpp/thirdparty/pffft/src/simd/pf_fma_x86.h
 
 ================================================================================
 

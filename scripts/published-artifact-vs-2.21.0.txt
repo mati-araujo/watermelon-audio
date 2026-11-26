@@ -132,3 +132,7 @@ aar/jar-entry:classes.jar!META-INF/com.watermellonstudios_audio_release.kotlin_m
 aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$PendingPermission.class = (ausente) -> presente   # MINI-042 (D3/D7, L2): privada, el par continuación + device que registra el CAS de la espera de permiso
 aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$requestPermissionSuspend$2$1.class = presente -> (ausente)   # MINI-042 (L2): la lambda de invokeOnCancellation cambia de nombre sintético (pasa a $3$1) porque el registro con CAS agrega un bloque antes
 aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$requestPermissionSuspend$3$1.class = (ausente) -> presente   # MINI-042 (L2): la misma lambda de invokeOnCancellation, que ahora suelta con compareAndSet(propio, null); verificado con javap
+
+# --- MINI-058: pffft detras de RealFFT. El .so cambia de bytes (no se declaran). NOTICE viaja
+# en el classes.jar; su hash es el del NOTICE de la raiz con LF (cada cambio de NOTICE lo re-declara).
+aar/jar-entry:classes.jar!META-INF/watermelon-audio/NOTICE = (ausente) -> sha256:87a1a48665ec0785   # MINI-058: las licencias de lo vendorizado piden reproducir su aviso con el binario
