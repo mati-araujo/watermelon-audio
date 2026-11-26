@@ -1,3 +1,6 @@
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+
 plugins {
     id("watermelon.kmp.native")
     `maven-publish`
@@ -83,13 +86,13 @@ abstract class NoticeInArchive : DefaultTask() {
     fun verify() {
         val entry = "META-INF/watermelon-audio/NOTICE"
         val file = archive.singleFile
-        java.util.zip.ZipFile(file).use { zip ->
+        ZipFile(file).use { zip ->
             val found = if (nestedJar.get().isEmpty()) {
                 zip.getEntry(entry) != null
             } else {
                 val inner = zip.getEntry(nestedJar.get())
                     ?: throw GradleException("${file.name} no tiene ${nestedJar.get()}")
-                java.util.zip.ZipInputStream(zip.getInputStream(inner)).use { jar ->
+                ZipInputStream(zip.getInputStream(inner)).use { jar ->
                     generateSequence { jar.nextEntry }.any { it.name == entry }
                 }
             }
