@@ -13,7 +13,8 @@
  * CREATE_ALWAYS y OPEN_ALWAYS, con o sin FILE_FLAG_OPEN_REPARSE_POINT (la junction es un directorio:
  * falla antes de atravesarla). Por eso el test de la junction NO distingue ese flag del CREATE_NEW del
  * `.part`. Lo distingue AForeignReparseFileAtThePartIsOpenedAsItself: un ARCHIVO con un reparse point
- * que nadie atiende (sin privilegio) da ERROR_FILE_EXISTS con el flag y ERROR_CANT_ACCESS_FILE sin el.
+ * que nadie atiende (sin privilegio) da ERROR_FILE_EXISTS con el flag y ERROR_CANT_ACCESS_FILE sin el
+ * (medido el 2026-11-10; en 26200.9974 da 1920 con los dos: ver ese test).
  * (Con un tag sin el bit de Microsoft, NTFS rechaza el FSCTL con ERROR_INVALID_REPARSE_DATA.)
  */
 
@@ -123,6 +124,9 @@ bool makeUnhandledReparseFile(const fs::path& file) {
     ::CloseHandle(h);
     return ok != 0;
 }
+
+/// Borra el reparse point mismo (DeleteFileW no lo atraviesa).
+bool removeReparseFile(const fs::path& file) { return ::DeleteFileW(file.c_str()) != 0; }
 
 bool isReparsePoint(const fs::path& p) {
     const DWORD a = ::GetFileAttributesW(p.c_str());
@@ -351,11 +355,32 @@ TEST_F(WavDumpWindowsTest, AC_061_4_ASymlinkAtThePartIsNeverFollowed) {
  *
  * Bug que atrapa: quitar el flag (el nombre ocupado se reportaria como "inaccesible", y con un reparse
  * point que SI se atiende, la creacion iria a donde apunta).
+ *
+ * La premisa se MIDE (Windows 11 26200.9974, 2026-11-26): ahi un reparse point con un tag de Microsoft
+ * que nadie atiende ya no lo abre ni su dueño, ni con FILE_FLAG_OPEN_REPARSE_POINT. CREATE_NEW da 1920 con
+ * y sin el flag, y DeleteFileW, FSCTL y `rmdir` tambien dan 1920, asi que el archivo no se puede borrar.
+ * `fs::remove_all` de libstdc++ (GCC 16.2) se queda en un lazo sobre el. Por eso:
+ *   - el archivo vive en una ruta FIJA de %TEMP%, fuera del `root` del fixture, y se REUSA entre corridas:
+ *     una sola entrada imborrable por maquina y no una por corrida;
+ *   - lo que se puede afirmar igual (falla cerrada, el reparse point intacto, ningun archivo nuevo) se
+ *     afirma siempre;
+ *   - el error de la primitiva (lo que distingue el flag) solo se afirma donde el SO lo distingue. Donde
+ *     no, el test sale SKIPPED con el mensaje declarado como `ambiente` en `tests/windows-not-run.txt`.
  */
 TEST_F(WavDumpWindowsTest, AC_061_4_AForeignReparseFileAtThePartIsOpenedAsItself) {
-    const fs::path part = work / "toma.wav.part";
-    ASSERT_TRUE(makeUnhandledReparseFile(part)) << "premisa: sin reparse point ajeno (error "
-                                                << ::GetLastError() << ")";
+    const fs::path dir = fs::temp_directory_path() / "wma-dumpwin-reparse-ajeno";
+    const fs::path part = dir / "toma.wav.part";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    if (!isReparsePoint(part)) {
+        ASSERT_TRUE(makeUnhandledReparseFile(part)) << "premisa: sin reparse point ajeno (error "
+                                                    << ::GetLastError() << ")";
+    }
+    const HANDLE probe = ::CreateFileW(part.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    const DWORD probeError = probe == INVALID_HANDLE_VALUE ? ::GetLastError() : 0;
+    if (probe != INVALID_HANDLE_VALUE) ::CloseHandle(probe);
 
     wma::platform::PartIdentity identity;
     ::SetLastError(0);
@@ -363,9 +388,18 @@ TEST_F(WavDumpWindowsTest, AC_061_4_AForeignReparseFileAtThePartIsOpenedAsItself
     const DWORD error = ::GetLastError();
     if (file != nullptr) std::fclose(file);
     EXPECT_EQ(file, nullptr) << "creo el .part encima de un reparse point";
-    EXPECT_EQ(error, static_cast<DWORD>(ERROR_FILE_EXISTS)) << "no lo trato como un nombre ocupado";
     EXPECT_TRUE(isReparsePoint(part)) << "el reparse point ajeno cambio";
-    EXPECT_EQ(namesIn(work), std::vector<std::string>{"toma.wav.part"});
+    EXPECT_EQ(namesIn(dir), std::vector<std::string>{"toma.wav.part"});
+
+    if (probeError != 0) {
+        GTEST_SKIP() << "el SO no abre un reparse point ajeno ni con FILE_FLAG_OPEN_REPARSE_POINT (error "
+                     << probeError << "): el flag no se distingue; falla cerrada, intacto y sin archivo nuevo, "
+                     << "afirmados";
+    }
+    EXPECT_EQ(error, static_cast<DWORD>(ERROR_FILE_EXISTS)) << "no lo trato como un nombre ocupado";
+    // Donde el SO lo abre, se puede borrar: no queda nada para la proxima corrida.
+    EXPECT_TRUE(removeReparseFile(part)) << "no se pudo borrar el reparse point ajeno (error "
+                                         << ::GetLastError() << ")";
 }
 
 /**

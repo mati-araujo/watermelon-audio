@@ -370,20 +370,22 @@ TEST(AnalysisThread, TheCaptureWriterIsNeverBlockedWhileTheThreadChurns) {
         }
     });
 
+    // Cada ciclo deja vivo al thread hasta que el escritor AVANZO: asi cada start/stop
+    // pasa con escrituras concurrentes, por condicion y no por duracion. Antes era un
+    // sleep de 3 ms y un piso de 50 escrituras en total, y el piso dependia del reloj
+    // del SO: en Windows, con el timer en 15,6 ms, sleep_for(200 us) dura 15,6 ms y
+    // el escritor llegaba a 15 (medido, MSYS2 UCRT64 -O0).
     for (int cycle = 0; cycle < 10; ++cycle) {
         th.start(kRate);
-        // ESTIMULO: le da al thread un rato de vida antes de pararlo, que es lo que
-        // ejercita el ciclo start/stop. No sincroniza nada — lo que se afirma
-        // despues son los contadores, no que este sleep haya alcanzado.
-        // WAIT-OK: estimulo — le da vida al thread antes de pararlo; es lo que
-        //          ejercita el ciclo start/stop, no sincroniza una asercion.
-        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        const uint64_t before = writes.load(std::memory_order_relaxed);
+        const bool advanced = wma_test::waitUntil(
+            [&] { return writes.load(std::memory_order_relaxed) >= before + 3; });
+        EXPECT_TRUE(advanced) << "ciclo " << cycle << ": el escritor no avanzo con el thread vivo";
         th.stop();
     }
     stop.store(true, std::memory_order_release);
     writer.join();
 
-    EXPECT_GT(writes.load(), 50u) << "el escritor casi no llego a escribir";
     // Cota deliberadamente FLOJA: lo que separa es "no espera a nadie" de "se
     // queda trabado", no un presupuesto de latencia. Bajo carga alta el
     // planificador solo ya explica varios ms, y afinar esto lo volveria un test
