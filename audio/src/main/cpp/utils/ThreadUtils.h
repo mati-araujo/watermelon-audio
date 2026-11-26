@@ -22,10 +22,10 @@
 #include <sched.h>
 #include <unistd.h>
 #include <sys/syscall.h>
-#include <sys/resource.h>
 #endif
 
 #include "../platform/Logger.h"
+#include "../platform/PosixSystemOps.h"
 
 #define THREAD_LOG_TAG "ThreadUtils"
 #define THREAD_LOGI(...) wma::logMessage(wma::LogLevel::INFO, THREAD_LOG_TAG, __VA_ARGS__)
@@ -191,7 +191,7 @@ public:
      */
     static int getNumCpus() {
 #if defined(__ANDROID__) || defined(__linux__)
-        return static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
+        return wma::platform::sysOnlineCpuCount();
 #else
         return std::thread::hardware_concurrency();
 #endif
@@ -237,7 +237,7 @@ private:
         // Set nice value for this thread
         // Note: setpriority with PRIO_PROCESS and tid=0 sets current thread
         pid_t tid = syscall(SYS_gettid);
-        bool niceApplied = (setpriority(PRIO_PROCESS, tid, niceValue) == 0);
+        bool niceApplied = wma::platform::sysSetThreadNice(tid, niceValue);
         if (niceApplied) {
             THREAD_LOGI("Set nice value to %d for tid %d", niceValue, tid);
         }

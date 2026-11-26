@@ -144,23 +144,17 @@ std::vector<float> runNoise(Effect& fx, std::mt19937& rng, float amp) {
 /**
  * Efectos que NO pueden cumplir la reproducibilidad bit a bit, y no por deuda.
  *
- * `RandomResoEffect` barre un filtro resonante con un LFO de forma
- * RANDOM_SMOOTH, y `LFO::randomFloat()` saca sus valores de un `std::mt19937`
- * sembrado con `std::random_device`. Sortean tanto el constructor del LFO como
- * su `reset()`: **dos instancias recien construidas ya suenan distinto entre
- * si**, sin que reset() intervenga en nada.
- *
- * Por eso NO va al `reset-baseline.txt`: ese archivo es deuda con dueño, y esto
- * no es deuda, es lo que el efecto es. Anotarlo ahi diria que alguien tiene que
- * arreglarlo, y no hay nada que arreglar.
- *
- * Pero una exclusion sin cobertura es un punto ciego, asi que esta acotada por
- * dos tests: `RandomResoIsNonDeterministicByConstructionNotByReset` **mide** que
- * la causa es la construccion y no el reset, y `ResetSilencesEveryEffect` le
- * exige lo que si es exigible — que despues de un reset no quede residuo.
+ * VACIO desde REQ-055 S2. Hasta entonces tenia a `RANDOM_RESO`: su LFO
+ * RANDOM_SMOOTH sacaba los valores de un `std::mt19937` sembrado con
+ * `std::random_device`, asi que dos instancias recien construidas ya sonaban
+ * distinto. El render offline determinista (ADR-0008 §2) necesitaba lo
+ * contrario, y el LFO paso a un xorshift32 POR INSTANCIA con semilla fija que
+ * `reset()` restaura. `RandomResoIsDeterministicSinceTheLfoIsSeeded` mide el
+ * cambio; el efecto entra ahora al test bit a bit, que es mas fuerte que la
+ * exclusion (lo pedia el propio test que la sostenia).
  */
 const std::set<std::string>& nonDeterministicByDesign() {
-    static const std::set<std::string> kNames = {"RANDOM_RESO"};
+    static const std::set<std::string> kNames = {};
     return kNames;
 }
 
@@ -378,15 +372,13 @@ TEST(EffectProperties, ResetMakesEveryEffectReproduceItsOutputExactly) {
 // La exclusion de RANDOM_RESO, MEDIDA en vez de afirmada
 // ===========================================================================
 
-TEST(EffectProperties, RandomResoIsNonDeterministicByConstructionNotByReset) {
-    // Una exclusion que se justifica con un comentario es una afirmacion sin
-    // respaldo. Esta se justifica con una medicion: si DOS INSTANCIAS RECIEN
-    // CONSTRUIDAS —sin que reset() participe— ya producen audio distinto,
-    // entonces la reproducibilidad bit a bit no le aplica al efecto, y no hay
-    // nada que reset() pueda hacer al respecto.
-    //
-    // Si algun dia RandomResoEffect se vuelve determinista, este test se pone
-    // rojo y avisa que hay que sacarlo de nonDeterministicByDesign().
+TEST(EffectProperties, RandomResoIsDeterministicSinceTheLfoIsSeeded) {
+    // REQ-055 S2. Este test MEDIA lo contrario —que dos RandomResoEffect recien
+    // construidos daban audio distinto— y decia que, el dia que dejara de ser
+    // cierto, el efecto saliera de nonDeterministicByDesign() y entrara al test
+    // bit a bit. Ese dia es este: el LFO se siembra por instancia. Lo que queda
+    // es la afirmacion positiva, para que una vuelta a una semilla no
+    // reproducible (random_device, un reloj, un contador global) se ponga roja.
     EffectRegistry registry;
     registerBuiltinEffects(registry);
 
@@ -403,16 +395,12 @@ TEST(EffectProperties, RandomResoIsNonDeterministicByConstructionNotByReset) {
     const std::vector<float> b = runOnce(0xABCDu);
 
     ASSERT_EQ(a.size(), b.size());
-    bool differs = false;
-    for (size_t i = 0; i < a.size() && !differs; ++i) {
-        if (a[i] != b[i]) differs = true;
+    for (size_t i = 0; i < a.size(); ++i) {
+        ASSERT_EQ(a[i], b[i])
+            << "dos RandomResoEffect recien construidos divergen en la muestra " << i
+            << ": el LFO RANDOM_SMOOTH volvio a sortear con una semilla que no "
+            << "se puede reproducir, y el render offline deja de ser determinista";
     }
-
-    EXPECT_TRUE(differs)
-        << "dos RandomResoEffect recien construidos dieron el MISMO audio.\n"
-        << "  Si el efecto se volvio determinista, sacalo de "
-        << "nonDeterministicByDesign() y dejalo entrar al test bit a bit — que "
-        << "es mas fuerte que la exclusion.";
 }
 
 // ===========================================================================
@@ -426,9 +414,9 @@ TEST(EffectProperties, ResetSilencesEveryEffect) {
     //
     // Es mas debil que la reproducibilidad bit a bit —no dice que la salida sea
     // la misma, solo que no haya cola— pero tiene una virtud que la otra no:
-    // NO DEPENDE DE QUE EL EFECTO SEA DETERMINISTA. Por eso cubre tambien a
-    // RANDOM_RESO, que queda afuera del test bit a bit, y por eso no hay ningun
-    // efecto sin cobertura de reset.
+    // NO DEPENDE DE QUE EL EFECTO SEA DETERMINISTA. Cubria tambien a
+    // RANDOM_RESO cuando quedaba afuera del test bit a bit (hasta REQ-055 S2,
+    // que sembro su LFO); hoy los 23 estan en los dos.
     EffectRegistry registry;
     registerBuiltinEffects(registry);
 

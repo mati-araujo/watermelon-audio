@@ -33,6 +33,7 @@
 #include <mutex>
 #include <thread>
 #include <functional>
+#include <utility>
 
 namespace watermelon_audio {
 
@@ -40,6 +41,89 @@ namespace watermelon_audio {
 // getLibusbBackend()'s return type — see PlatformBackends.h.
 class LibusbBackend;
 class SplitBackend;
+
+/**
+ * REQ-050 S2 (AC-050.3) — por qué no puede arrancar el streaming USB, con su causa.
+ *
+ * `nativeStartUsbStreamingWithMode` devolvía un `jboolean`, así que "sin motor", "sin
+ * callback", "sin device" y "libusb no arrancó" llegaban a Kotlin como el mismo
+ * STREAMING_ERROR genérico. Los valores 0..6 cruzan el JNI como `jint` y Kotlin los mapea
+ * uno por uno (`UsbStreamStartStatus` en AudioNativeBridge.kt): **no se renumeran**.
+ *
+ * `PROCEED` no cruza: es "las precondiciones están, ahora arrancá", y el resultado final
+ * lo da `LibusbBackend::start()` (OK o START_FAILED).
+ */
+enum class UsbStreamStartStatus : int {
+    PROCEED = -1,
+    OK = 0,
+    NOT_INITIALIZED = 1,
+    NO_ENGINE = 2,
+    NO_BACKEND = 3,
+    NO_CALLBACK = 4,
+    INVALID_MODE = 5,
+    START_FAILED = 6,
+};
+
+/** Los hechos que la JNIEXPORT junta antes de arrancar el streaming USB. */
+struct UsbStreamStartFacts {
+    bool alreadyStreaming = false;
+    bool engineExists = false;
+    bool deviceInitialized = false;
+    bool backendPresent = false;
+    bool modeValid = false;
+    bool backendHasCallback = false;
+};
+
+/**
+ * Decide qué causa nombrar. Pura y sin estado para poder afirmarla en la suite de host,
+ * donde no hay backend libusb (test_usb_stream_start.cpp).
+ *
+ * El orden es el de las causas de raíz: sin motor no hay callback ni manager propio, así
+ * que se nombra el motor antes que el device, y el device antes que el backend.
+ * "Ya transmitiendo" va primero porque era el contrato previo: éxito sin tocar nada.
+ */
+inline UsbStreamStartStatus classifyUsbStreamStart(const UsbStreamStartFacts& f) noexcept {
+    if (f.alreadyStreaming) return UsbStreamStartStatus::OK;
+    if (!f.engineExists) return UsbStreamStartStatus::NO_ENGINE;
+    if (!f.deviceInitialized) return UsbStreamStartStatus::NOT_INITIALIZED;
+    if (!f.backendPresent) return UsbStreamStartStatus::NO_BACKEND;
+    if (!f.modeValid) return UsbStreamStartStatus::INVALID_MODE;
+    if (!f.backendHasCallback) return UsbStreamStartStatus::NO_CALLBACK;
+    return UsbStreamStartStatus::PROCEED;
+}
+
+/**
+ * REQ-050 S3 (AC-050.8, D17) — what a manual altsetting / clock source request means.
+ *
+ * The USB test runner renegotiates each row with `selectAltsetting`/`selectClockSource`,
+ * and the backend keeps that selection for every later start. To hand the consumer back
+ * the automatic choice, the two existing JNI entry points take a sentinel: exactly
+ * (-1, -1, -1) for the altsetting and 0 for the clock source. Any other out-of-range value
+ * is still a rejection, so a miscomputed negative index can never read as "automatic".
+ * Pure, so the host suite can assert it (test_usb_selection_request.cpp).
+ */
+enum class UsbSelectionRequest : int {
+    SELECT = 0,
+    CLEAR = 1,
+    REJECT = 2,
+};
+
+inline UsbSelectionRequest classifyAltsettingRequest(int interfaceNumber, int alternateSetting,
+                                                     int formatIndex) noexcept {
+    if (interfaceNumber == -1 && alternateSetting == -1 && formatIndex == -1) {
+        return UsbSelectionRequest::CLEAR;
+    }
+    if (interfaceNumber < 0 || alternateSetting < 0 || formatIndex < 0) {
+        return UsbSelectionRequest::REJECT;
+    }
+    return UsbSelectionRequest::SELECT;
+}
+
+inline UsbSelectionRequest classifyClockSourceRequest(int clockSourceId) noexcept {
+    if (clockSourceId == 0) return UsbSelectionRequest::CLEAR;
+    if (clockSourceId < 0 || clockSourceId > 255) return UsbSelectionRequest::REJECT;
+    return UsbSelectionRequest::SELECT;
+}
 
 /**
  * BackendManager
@@ -70,6 +154,22 @@ public:
      * Does NOT take ownership — caller must ensure lifetime.
      */
     static void setGlobalInstance(BackendManager* instance);
+
+    /**
+     * Register @p instance as the global one ONLY if none is registered (REQ-055 S2).
+     *
+     * `wma_engine_create()` used to call setGlobalInstance() unconditionally, so a
+     * SECOND engine (an offline render instance) stole the global from the live
+     * one, and destroying it left the global null: every JNI entry point that goes
+     * through getInstance() then drove the wrong manager, or the default static
+     * one. First registered wins; the JNI forces its live engine with
+     * setGlobalInstance() regardless of order.
+     * @return true if @p instance is now the global one.
+     */
+    static bool registerGlobalIfUnset(BackendManager* instance);
+
+    /** Clear the global pointer ONLY if it is @p instance (compare-and-swap). */
+    static void clearGlobalIf(BackendManager* instance);
 
     // Prevent copy/move
     BackendManager(const BackendManager&) = delete;
@@ -329,14 +429,52 @@ public:
     }
 
     /**
-     * Get direct access to LibusbBackend.
+     * MINI-042 (M1, D5) — acceso al LibusbBackend CON ALCANCE, para lecturas y
+     * configuraciones CORTAS.
      *
-     * Used for USB-specific operations like getting transfer stats.
-     * Only valid after successful initializeUsbBackend().
+     * Corre `fn(LibusbBackend*)` con `mMutex` tomado; el puntero es nullptr si no
+     * hay backend USB. Antes habia un `getLibusbBackend()` que devolvia el puntero
+     * crudo DESPUES de soltar el lock, y `fallbackToOboe()` lo destruia mientras la
+     * JNI lo leia: un SIGSEGV en el proceso del consumidor.
      *
-     * @return Pointer to LibusbBackend, or nullptr if not available.
+     * El puntero no puede salir de `fn`. Y `fn`:
+     *   - no puede volver a entrar al manager (mMutex no es recursivo);
+     *   - no puede hacer nada lento: este es el lock que pregunta Main. Arrancar,
+     *     parar o elegir altsetting/reloj (que toman el mutex del backend con
+     *     lock(), y por eso esperan a un start() en curso) van por
+     *     withLibusbBackendLifecycle().
      */
-    LibusbBackend* getLibusbBackend();
+    template <typename Fn>
+    decltype(auto) withLibusbBackend(Fn&& fn) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        return std::forward<Fn>(fn)(usbBackendLocked());
+    }
+
+    /**
+     * MINI-042 (M1, D5) — acceso al LibusbBackend para operaciones de CICLO DE
+     * VIDA: start(), stop(), la seleccion de altsetting y de reloj.
+     *
+     * Corre `fn(LibusbBackend*)` con `mOpMutex` tomado y `mMutex` LIBRE: el lock
+     * que se sostiene alrededor de la llamada lenta es el de operaciones, nunca el
+     * de estado (ver mOpMutex). Asi un start() USB no le traba la mano a Main, que
+     * sigue leyendo por withLibusbBackend(). El backend no se puede destruir
+     * mientras `fn` corre porque todo camino que lo destruye —fallbackToOboe(),
+     * initializeUsbBackend()— toma mOpMutex primero.
+     *
+     * `fn` no puede llamar a start()/stop()/selectBackend()/fallbackToOboe()/
+     * initializeUsbBackend() del manager: todos toman mOpMutex, que no es
+     * recursivo.
+     */
+    template <typename Fn>
+    decltype(auto) withLibusbBackendLifecycle(Fn&& fn) {
+        std::lock_guard<std::mutex> op(mOpMutex);
+        LibusbBackend* backend = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            backend = usbBackendLocked();
+        }
+        return std::forward<Fn>(fn)(backend);
+    }
 
     // =========================================================================
     // Event Callbacks
@@ -477,6 +615,18 @@ private:
 
     /// Una pasada: stop + start, con el fallback a "sin captura" si falla.
     void reopenOnce();
+
+    /// El LibusbBackend detras de mUsbBackend, o nullptr. Requiere mMutex tomado.
+    LibusbBackend* usbBackendLocked() const;
+
+    /// Cuerpo de selectBackend(). Requiere mOpMutex tomado (y mMutex LIBRE): lo
+    /// usa fallbackToOboe() para cambiar de backend y desenganchar el USB sin
+    /// soltar mOpMutex en el medio.
+    bool selectBackendOpLocked(BackendType type);
+
+    /// MINI-042 (D6): el reproductor de host adopta un LibusbBackend real como
+    /// mUsbBackend. Definido sólo en el test.
+    friend struct BackendManagerTestAccess;
 
     // Internal helpers
     void notifyBackendChanged(BackendType oldType, BackendType newType);

@@ -22,12 +22,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Fetch Google Test (same pin as usb/tests).
 include(FetchContent)
-FetchContent_Declare(googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.15.2
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+# El pin de googletest vive en UN solo lugar (REQ-047 S4).
+include(${CMAKE_CURRENT_LIST_DIR}/../../thirdparty/googletest.cmake)
 
 # Shared sources from the engine (Logger.cpp for the stderr fallback that
 # the looper headers include via platform/Logger.h).
@@ -42,6 +38,7 @@ set(LOOPER_TESTED_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/OfflineAnalysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/AnalysisThread.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/AnalysisRing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/TunerInputDump.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/PhaseSlopeEstimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/StrobeTracker.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/InharmonicityEstimator.cpp
@@ -66,6 +63,7 @@ add_executable(looper_tests
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
     test_track_analysis.cpp
+    test_song_player.cpp
     ${LOOPER_TESTED_SOURCES}
 )
 
@@ -81,7 +79,7 @@ target_compile_definitions(looper_tests PRIVATE _USE_MATH_DEFINES
     WMA_LOOPER_TESTDATA_DIR="${LOOPER_TESTDATA_DIR}")
 
 include(GoogleTest)
-gtest_discover_tests(looper_tests)
+wma_gtest_discover_tests(looper_tests)
 
 # ----------------------------------------------------------------------------
 # looper_tests_dense — the SAME suite compiled with WM_LOOPER_DENSE_BUFFER, so the
@@ -102,6 +100,7 @@ add_executable(looper_tests_dense
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
     test_track_analysis.cpp
+    test_song_player.cpp
     ${LOOPER_TESTED_SOURCES}
 )
 target_include_directories(looper_tests_dense PRIVATE
@@ -112,7 +111,7 @@ target_link_libraries(looper_tests_dense PRIVATE GTest::gtest_main)
 target_compile_definitions(looper_tests_dense PRIVATE
     _USE_MATH_DEFINES WM_LOOPER_DENSE_BUFFER
     WMA_LOOPER_TESTDATA_DIR="${LOOPER_TESTDATA_DIR}")
-gtest_discover_tests(looper_tests_dense)
+wma_gtest_discover_tests(looper_tests_dense)
 
 # ----------------------------------------------------------------------------
 # bench_mix_into — standalone micro-benchmark for TrackBuffer::mixInto (F0).

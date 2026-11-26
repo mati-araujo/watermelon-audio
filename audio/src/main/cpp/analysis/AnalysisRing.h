@@ -78,6 +78,14 @@ public:
     static constexpr uint32_t kCapacityFrames = 8192;
     static constexpr uint32_t kMask = kCapacityFrames - 1;
 
+    /// El bloque mas grande que el UNICO escritor de produccion deja de una vez: `InputNode`
+    /// recorta cada bloque a su buffer de trabajo, preparado con maxBlockSize 4096. Es lo que el
+    /// volcado de diagnostico (`copyForInputDump`) se reserva contra el desgarro; si algun dia el
+    /// escritor entrega bloques mayores, esta constante sube con el.
+    static constexpr uint32_t kDumpTearGuardFrames = 4096;
+    /// Hasta donde hacia atras acepta copiar el volcado: lo mas viejo que eso cuenta como perdido.
+    static constexpr uint32_t kDumpWindowFrames = kCapacityFrames - kDumpTearGuardFrames;
+
     AnalysisRing()
         : mBuffer(std::make_unique<std::atomic<float>[]>(kCapacityFrames)) {
         for (uint32_t i = 0; i < kCapacityFrames; ++i) {
@@ -132,6 +140,33 @@ public:
      * escritor paso por encima durante la copia, la descarta.
      */
     int read(float* out, int maxFrames) noexcept;
+
+    /// Posicion de escritura: frames escritos desde el ultimo `reset()`. Es la coordenada de
+    /// `copyForInputDump` y de `captureSeamPosition()`.
+    uint64_t writePosition() const noexcept {
+        return mWritten.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Copia para el volcado de diagnostico (REQ-055 S0) desde `cursor`, sin tocar NADA del
+     *        lector del analisis (`mRead`, `mDropped`, `mTorn`).
+     * @return frames copiados a `out`; 0 si no habia nada o la copia se descarto por desgarro.
+     *
+     * Misma verificacion que `read()`, con una guarda mas ancha, y la guarda es lo que la hace
+     * honesta. El re-chequeo de `read()` relee `mWritten`, que NO ve el bloque que el escritor
+     * esta escribiendo y todavia no publico: si la copia empezo a `kCapacityFrames - b` frames
+     * detras (b = ese bloque en vuelo), los slots mas viejos ya estan pisados y nada lo delata.
+     * Medido: 140 frames corruptos con el re-chequeo puesto. Por eso la capacidad EFECTIVA es
+     * `kDumpWindowFrames` en los dos chequeos: lo mas atras que eso cuenta como perdido, y un
+     * bloque en vuelo (<= `kDumpTearGuardFrames`) nunca alcanza un slot que la copia acepta.
+     * Costo: el hilo de analisis puede atrasarse ~85 ms (no 170) antes de que la toma se declare
+     * invalida; invalida de mas es honesto, sana con huecos no. `read()` queda como estaba.
+     *
+     * Precondicion: `cursor <= writePosition()`; el llamador detecta el retroceso por `reset()`.
+     * Lo unico que escribe es lo que recibe: `cursor` y `lostFrames` son del llamador.
+     */
+    int copyForInputDump(uint64_t& cursor, float* out, int maxFrames,
+                         uint64_t& lostFrames) const noexcept;
 
     /**
      * @brief Estampa el rate al que se esta capturando. RT-SAFE (un store).

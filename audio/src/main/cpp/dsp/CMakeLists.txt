@@ -3,11 +3,16 @@
 #
 # Phase 1A — Audio Library Extraction
 #
-# Zero external dependencies. Only uses C++ standard library.
+# Only the C++ standard library, plus the vendored pffft behind RealFFT.
 # Can be compiled and tested independently on any platform.
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.22.1)
+
+# pffft, detras de RealFFT (MINI-058). Un solo target aunque varias suites traigan dsp.
+if(NOT TARGET pffft)
+    include(${CMAKE_CURRENT_LIST_DIR}/../thirdparty/pffft.cmake)
+endif()
 
 add_library(watermelon-dsp STATIC
     # Filters
@@ -18,6 +23,9 @@ add_library(watermelon-dsp STATIC
 
     # Deteccion de altura (REQ-001 S4)
     McLeodPitch.cpp
+
+    # FFT real (MINI-058)
+    RealFFT.cpp
 
     # Delay
     DelayLine.cpp
@@ -41,6 +49,7 @@ add_library(watermelon-dsp STATIC
 
 target_include_directories(watermelon-dsp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(watermelon-dsp PUBLIC cxx_std_20)
+target_link_libraries(watermelon-dsp PRIVATE pffft)
 
 # Propagate SIMD defines so consumers get USE_NEON/USE_SSE
 if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")

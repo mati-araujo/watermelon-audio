@@ -59,7 +59,36 @@ enum class UsbTestStatus {
     PASSED,
     FAILED,
     CANCELLED,
-    SKIPPED
+    SKIPPED,
+
+    /**
+     * REQ-050 (AC-050.8, D5, D19): the device's descriptors do not offer what the row declares
+     * (its sample rate, bit depth or channel count), so the row was NOT measured and the stream
+     * was not touched. It is never a pass: [UsbTestReport.allPassed] is false with one of these.
+     *
+     * A rate the descriptors DO offer but the device then coerces to another one is
+     * [FAILED], not this ("offered X, ran at Y").
+     */
+    NOT_APPLICABLE
+}
+
+/**
+ * REQ-050 (AC-050.8, D18) — what happened to the consumer's stream after a row that had to
+ * reopen it at its own configuration.
+ */
+enum class UsbStreamRestore {
+    /** The stream already ran at the row's configuration: it was measured as it was. */
+    NOT_NEEDED,
+
+    /** The row reopened the stream and it is back at the configuration it had before. */
+    RESTORED,
+
+    /**
+     * The row reopened the stream and could not bring it back (see
+     * [UsbTestResult.streamRestoreMessage]). The stream may be stopped, or at the row's
+     * configuration.
+     */
+    FAILED
 }
 
 /**
@@ -82,7 +111,13 @@ data class UsbTestConfig(
     val toneAmplitude: Float = 0.5f,
 
     // Pass/fail thresholds
-    val maxAllowedLatencyMs: Double = 20.0,
+    /**
+     * An EXTRA latency limit for the row, on top of the one the backend declares
+     * ([UsbTransferStats.declaredMaxLatencyMs]). The default, +∞, means "the backend's ceiling
+     * decides" (REQ-050, AC-050.9): the old fixed 20 ms failed by construction against the
+     * libusb backend, which in its SAFE profile sits at ~37 ms with perfect traffic.
+     */
+    val maxAllowedLatencyMs: Double = Double.POSITIVE_INFINITY,
     val maxAllowedUnderruns: Long = 0,
     val maxAllowedOverruns: Long = 0,
     val minSuccessRatePct: Float = 99.9f
@@ -91,22 +126,25 @@ data class UsbTestConfig(
         /** Default configuration for quick tests */
         val DEFAULT = UsbTestConfig()
 
-        /** Low latency configuration */
+        /**
+         * Low latency configuration. Its latency limit is the backend's declared ceiling, like
+         * every other preset (REQ-050, AC-050.9): a fixed 10 ms failed by construction against
+         * the SAFE profile. To test the LOW_LATENCY profile, select it with
+         * `IUsbAudioManager.setLatencyProfile` before streaming; the ceiling follows it.
+         */
         val LOW_LATENCY = UsbTestConfig(
             sampleRate = 48000,
             channels = 2,
             bitDepth = 16,
             bufferSizeFrames = 128,
-            maxAllowedLatencyMs = 10.0
         )
 
-        /** High quality configuration */
+        /** High quality configuration. Latency limit: the backend's declared ceiling (it was a fixed 30 ms). */
         val HIGH_QUALITY = UsbTestConfig(
             sampleRate = 96000,
             channels = 2,
             bitDepth = 24,
             bufferSizeFrames = 512,
-            maxAllowedLatencyMs = 30.0
         )
 
         /** Stress test configuration */
@@ -162,7 +200,32 @@ data class UsbTestResult(
     val statsSamples: List<UsbTransferStats> = emptyList(),
 
     // Physical loopback round-trip result (LOOPBACK test only; Fase 5).
-    val roundTrip: RoundTripTestResult? = null
+    val roundTrip: RoundTripTestResult? = null,
+
+    /**
+     * REQ-050 (AC-050.9, D16): output packets the backend keeps in flight. They were submitted
+     * and have no fate yet, so [successRate] does not count them as lost.
+     */
+    val packetsInFlight: Long = 0,
+
+    /**
+     * REQ-050 (AC-050.9): the latency limit the row was judged against, in ms — the ceiling the
+     * backend declared, or [UsbTestConfig.maxAllowedLatencyMs] if that is stricter. 0 if no
+     * latency was judged.
+     */
+    val latencyLimitMs: Double = 0.0,
+
+    /**
+     * REQ-050 (AC-050.8): the sample rate the stream actually ran at during the row, as the
+     * engine reports it (after any coercion by the device). 0 if unknown.
+     */
+    val streamSampleRateHz: Int = 0,
+
+    /** REQ-050 (AC-050.8, D18): what happened to the consumer's stream after the row. */
+    val streamRestore: UsbStreamRestore = UsbStreamRestore.NOT_NEEDED,
+
+    /** Why [streamRestore] is [UsbStreamRestore.FAILED]; null otherwise. */
+    val streamRestoreMessage: String? = null,
 ) {
     /**
      * Check if the test passed based on thresholds.
@@ -172,12 +235,21 @@ data class UsbTestResult(
                 (status == UsbTestStatus.RUNNING && meetsThresholds(config))
 
     /**
-     * Calculate success rate.
+     * Success rate in percent: completed packets over the packets whose fate is known — sent
+     * minus [packetsInFlight] (REQ-050, AC-050.9, D10). Counting the in-flight ones as lost made
+     * a perfect stream fail the 99.9 % criterion by construction (MINI-039: 192 of 57 152).
+     *
+     * Without resolved packets it is 0, not 100: no traffic is not a success.
+     *
+     * The counters are the backend's: `packetsSubmitted` counts OUTPUT packets only, and in
+     * full duplex `packetsCompleted` also counts input completions, so there this can exceed
+     * 100 %. It is meaningful for playback rows.
      */
     val successRate: Float
-        get() = if (totalPackets > 0) {
-            successfulPackets.toFloat() / totalPackets.toFloat() * 100f
-        } else 100f
+        get() {
+            val resolved = totalPackets - packetsInFlight
+            return if (resolved > 0) successfulPackets.toFloat() / resolved.toFloat() * 100f else 0f
+        }
 
     /**
      * Check if there are any errors in the result.
@@ -189,7 +261,9 @@ data class UsbTestResult(
      * Check if results meet the configured thresholds.
      */
     fun meetsThresholds(config: UsbTestConfig): Boolean {
-        return avgLatencyMs <= config.maxAllowedLatencyMs &&
+        val limit = if (latencyLimitMs > 0.0) minOf(latencyLimitMs, config.maxAllowedLatencyMs)
+                    else config.maxAllowedLatencyMs
+        return avgLatencyMs <= limit &&
                 underruns <= config.maxAllowedUnderruns &&
                 overruns <= config.maxAllowedOverruns &&
                 successRate >= config.minSuccessRatePct
@@ -215,6 +289,11 @@ data class UsbTestResult(
             appendLine("  Underruns:  $underruns")
             appendLine("  Overruns:   $overruns")
             appendLine("  Errors:     $errors")
+            if (packetsInFlight > 0) appendLine("  In flight:  $packetsInFlight")
+            if (streamSampleRateHz > 0) appendLine("Stream rate: ${streamSampleRateHz}Hz")
+            if (streamRestore != UsbStreamRestore.NOT_NEEDED) {
+                appendLine("Stream restore: $streamRestore" + (streamRestoreMessage?.let { " ($it)" } ?: ""))
+            }
 
             if (avgInputLevelDb != Float.NEGATIVE_INFINITY) {
                 appendLine()
@@ -306,11 +385,16 @@ data class UsbTestReport(
     val failedCount: Int
         get() = results.count { it.status == UsbTestStatus.FAILED }
 
+    /** Rows the device does not offer (REQ-050, AC-050.8): neither passed nor failed. */
+    val notApplicableCount: Int
+        get() = results.count { it.status == UsbTestStatus.NOT_APPLICABLE }
+
     /**
      * Overall status summary.
      */
     val statusSummary: String
-        get() = "$passedCount/${results.size} tests passed"
+        get() = "$passedCount/${results.size} tests passed" +
+            if (notApplicableCount > 0) " ($notApplicableCount not applicable)" else ""
 
     /**
      * Generate a full report text.

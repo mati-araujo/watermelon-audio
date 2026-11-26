@@ -113,7 +113,32 @@ enum class UsbAudioError(val code: Int, val message: String) {
     ALREADY_CONNECTED(11, "Device is already connected"),
     NOT_CONNECTED(12, "Device is not connected"),
     STREAMING_ERROR(13, "Streaming error"),
-    INITIALIZATION_FAILED(14, "Failed to initialize USB device");
+    INITIALIZATION_FAILED(14, "Failed to initialize USB device"),
+
+    /**
+     * No existe el motor de audio (REQ-050, AC-050.3 y AC-050.4).
+     *
+     * `startStreaming` lo devuelve si el motor no existe al arrancar (por ejemplo, porque se
+     * liberó después de conectar). `connectDevice` lo devuelve si no pudo crearlo: sin motor, el
+     * backend USB quedaría registrado en un manager que se descarta al crearse el motor. Antes
+     * esto salía como [STREAMING_ERROR] o como un éxito que después reportaba OBOE.
+     */
+    NO_ENGINE(15, "Audio engine does not exist"),
+
+    /**
+     * El backend USB no tiene a quién pedirle audio: el motor no le instaló su callback
+     * (REQ-050, AC-050.3). Pasa cuando el device se conectó con el motor CORRIENDO, que no se
+     * puede reconfigurar con el stream vivo: hay que pararlo y pasar a `AudioBackendType.LIBUSB`
+     * (`setAudioBackend`) antes de `startStreaming`. Antes salía como [STREAMING_ERROR].
+     */
+    NO_AUDIO_CALLBACK(16, "Audio engine callback is not installed on the USB backend"),
+
+    /**
+     * Ya hay OTRO device USB conectado (REQ-050, AC-050.5). `connectDevice` está serializado: un
+     * segundo pedido espera al que está en curso; si ése conectó otro device, éste falla así, sin
+     * tocar el stream vivo. Para cambiar de device, `disconnectDevice` primero.
+     */
+    DEVICE_BUSY(17, "Another USB device is already connected");
 
     companion object {
         fun fromCode(code: Int): UsbAudioError = entries.find { it.code == code } ?: INTERNAL_ERROR

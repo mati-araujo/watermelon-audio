@@ -1,0 +1,6 @@
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=sensor ok=true n=1 sensor=oido-humano veredicto=presente evidencia=respuesta:s estimulo=A4-440Hz ruta=sistema
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=sensor ok=true n=2 sensor=oido-humano veredicto=presente evidencia=respuesta:s estimulo=A4-440Hz ruta=sistema
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=sensor ok=true n=1 sensor=oido-humano veredicto=presente evidencia=respuesta:s estimulo=A4-440Hz ruta=sistema
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=sensor ok=true n=2 sensor=oido-humano veredicto=ausente evidencia=respuesta:n estimulo=A4-440Hz ruta=sistema
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=sensor ok=true n=1 sensor=oido-humano veredicto=ausente evidencia=respuesta:n estimulo=A4-440Hz ruta=libusb
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=sensor ok=true n=2 sensor=oido-humano veredicto=presente evidencia=respuesta:s estimulo=A4-440Hz ruta=libusb

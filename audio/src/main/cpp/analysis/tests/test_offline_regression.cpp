@@ -46,6 +46,7 @@
 
 #include "../AnalysisSnapshot.h"
 #include "../OfflineAnalysis.h"
+#include "../PhaseSlopeEstimator.h"
 
 #include <gtest/gtest.h>
 
@@ -69,8 +70,15 @@ constexpr int kSignRate = 48000;
 /// INALCANZABLE — medido en 103 puntos.
 constexpr double kSteelB = 1.0e-3;
 
-/// La cuerda del reporte de campo: 35 cents ABAJO. El motor publicaba +27,53.
-constexpr double kReportedCents = -35.0;
+/// La cuerda del reporte de campo: 35 cents ABAJO de un rango util de 30,5 c (1,148 veces el
+/// rango), donde el motor publicaba +27,53.
+///
+/// REQ-057 S1: el rango util de E4 a 48 kHz pasa a 107,4 c (hop 1024, κ = 0,9) y a −35 c la
+/// cuerda ya no esta fuera de rango —converge de verdad—, asi que el caso se ESCALA al rango de
+/// produccion con la misma fraccion (35/30,5), igual que `SignOutsideRange.*`. La aserción de signo
+/// no cambia.
+const double kReportedCents =
+    -(35.0 / 30.5) * wma::analysis::InterleavedPhaseEstimator::denseRangeCents(kSignRate, kE4);
 
 /// Adentro del rango util, para el gemelo. Con esto el motor TIENE que hablar.
 constexpr double kInsideRangeCents = -10.0;
@@ -385,8 +393,9 @@ double maxInharmonicBiasCents(double B) {
  * son 13,74 cents para arriba.
  *
  * Los ejes son tres y ninguno es decorativo:
- *   - la DESVIACION, a ambos lados y bien afuera del rango util (que a 48 kHz es
- *     de 30,50 cents): el defecto vive JUSTO en el borde;
+ *   - la DESVIACION, a ambos lados y hasta ±130 c, o sea tambien AFUERA del rango
+ *     util de produccion (REQ-057: 107,4 c para E4 a 48 kHz; antes 30,50 c): el
+ *     defecto vive JUSTO en el borde;
  *   - la INARMONICIDAD, porque con `B = 0` el defecto es inalcanzable y con
  *     `B = 1e-3` aparece — o sea que un barrido de una sola B no barre nada;
  *   - el SIGNO, porque la guarda se apoya en la magnitud de la gruesa y una
@@ -399,7 +408,7 @@ double maxInharmonicBiasCents(double B) {
  */
 TEST(OfflineRegression, NoDeviationEverPublishesTheOppositeSign) {
     constexpr int kFrames = 72000;   // ver la nota de REQ-036 en el primer test
-    constexpr double kInsideUsableRange = 20.0;   // holgado contra los 30,50 c
+    constexpr double kInsideUsableRange = 20.0;   // holgado contra los 107,4 c de E4 a 48 kHz
     // Margen sobre el sesgo, para no afirmar justo en el filo donde el nominal y
     // el sesgo se cancelan.
     constexpr double kBiasMargin = 1.0;
@@ -412,7 +421,7 @@ TEST(OfflineRegression, NoDeviationEverPublishesTheOppositeSign) {
 
     for (double B : {0.0, 1.0e-4, kSteelB}) {
         const double bias = maxInharmonicBiasCents(B);
-        for (double cents = -60.0; cents <= 60.0 + 1e-9; cents += 2.5) {
+        for (double cents = -130.0; cents <= 130.0 + 1e-9; cents += (std::fabs(cents) < 60.0 - 1e-9 ? 2.5 : 5.0)) {
             // Donde el sesgo puede tapar a la desviacion, el nominal NO es el
             // sustituto de la verdad y afirmar el signo seria afirmar sobre el
             // generador, no sobre el motor.

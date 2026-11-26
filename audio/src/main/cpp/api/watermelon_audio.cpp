@@ -11,7 +11,9 @@
 #include "watermelon_audio_internal.h"
 
 #include "../analysis/OfflineAnalysis.h"
+#include "../analysis/WavFileDumpSink.h"
 #include "../core/AudioMode.h"
+#include "../looper/OnsetDetection.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
 #include "../platform/LogCaptureBuffer.h"
@@ -84,6 +86,18 @@ bool wmaEnsureInputNode(WmaEngine* e) {
 static bool ensureInputNode(WmaEngine* e) { return wmaEnsureInputNode(e); }
 
 /**
+ * The BackendManager OF THIS ENGINE (REQ-055 S2). Functions that take a handle
+ * ask their own engine's manager, not the global one: with a second instance in
+ * the process (offline render) they are different objects. The handle-less
+ * backend functions (wma_select_backend, wma_usb_*...) keep operating on the
+ * global, which is the live engine's.
+ */
+static watermelon_audio::BackendManager& managerOf(const WmaEngine* e) {
+    return (e && e->backendManager) ? *e->backendManager
+                                    : watermelon_audio::BackendManager::getInstance();
+}
+
+/**
  * @brief Re-prepara el nodo con el rate que el stream de captura negocio (REQ-012.4).
  *
  * 🔴 POR QUE HACE FALTA UN CABLE APARTE PARA ESTE CAMINO. `startInputStream()` abre
@@ -142,10 +156,14 @@ WmaEngine* wma_engine_create(void) {
 
         // Create BackendManager owned by this engine (Phase 0D)
         e->backendManager = std::make_unique<watermelon_audio::BackendManager>();
-        // Register as global instance so legacy code (JNI, AudioEngine) can find it
-        watermelon_audio::BackendManager::setGlobalInstance(e->backendManager.get());
+        // Register as global instance so legacy code (JNI, AudioEngine) can find it —
+        // but only if there is none yet (REQ-055 S2): a second engine (an offline
+        // render instance) must not steal the live engine's manager. The engine
+        // itself never goes through the global: it gets its own manager below.
+        watermelon_audio::BackendManager::registerGlobalIfUnset(e->backendManager.get());
 
         e->engine = std::make_unique<AudioEngine>();
+        e->engine->setBackendManager(e->backendManager.get());
         return e;
     } catch (...) {
         return nullptr;
@@ -156,16 +174,24 @@ void wma_engine_destroy(WmaEngine* engine) {
     if (!engine) return;
     // El orden importa y es el unico correcto: primero se para el stream de
     // captura, y recien ahi se puede liberar el ring. Al reves, un callback de
-    // captura en vuelo escribiria en memoria liberada. `stopInputStream()`
-    // junta el thread del stream, asi que despues de esa linea no queda ninguno.
+    // captura en vuelo escribiria en memoria liberada. `shutdownCapture()` borra
+    // todos los dueños y junta el thread del stream, asi que despues de esa linea
+    // no queda ninguno.
     if (engine->inputNode) {
-        engine->inputNode->stopInputStream();
+        engine->inputNode->shutdownCapture();
         engine->inputNode->setAnalysisRing(nullptr);
     }
     if (engine->analysisThread) {
         engine->analysisThread->stop();
+        // Una toma viva se cierra ANTES de liberar nada: con el hilo ya parado el desarme se
+        // aplica directo (el productor queda confirmado desarmado) y el archivo se nombra.
+        if (engine->tunerInputDump && engine->tunerInputDump->takeActive()) {
+            engine->analysisThread->setInputDump(nullptr);
+            engine->tunerInputDump->endTake();
+        }
         engine->analysisThread.reset();
     }
+    engine->tunerInputDump.reset();
     engine->analysisSnapshot.reset();
     engine->analysisRing.reset();
     if (engine->inputNode) {
@@ -177,7 +203,9 @@ void wma_engine_destroy(WmaEngine* engine) {
     }
     // Clear global instance before destroying BackendManager
     if (engine->backendManager) {
-        watermelon_audio::BackendManager::setGlobalInstance(nullptr);
+        // Only if it is ours: destroying an offline instance must not unregister
+        // the live engine's manager (REQ-055 S2).
+        watermelon_audio::BackendManager::clearGlobalIf(engine->backendManager.get());
         engine->backendManager.reset();
     }
     delete engine;
@@ -832,16 +860,17 @@ void wmaAttachInputForMode(WmaEngine* engine) {
         return;
     }
 
-    const auto backendType = watermelon_audio::BackendManager::getInstance().getCurrentType();
+    const auto backendType = managerOf(engine).getCurrentType();
     const bool backendDeliversInput =
         (backendType == watermelon_audio::BackendType::LIBUSB);
 
+    // El modo es el dueño Consumer (REQ-054.1): re-adquirir en cada cambio de modo es
+    // idempotente, y `wma_input_stop` lo suelta.
     if (backendDeliversInput) {
-        if (engine->inputNode->isInputStreamRunning()) {
-            engine->inputNode->stopInputStream();
-        }
-    } else if (!engine->inputNode->isInputStreamRunning()) {
-        engine->inputNode->startInputStream();
+        engine->inputNode->acquireCapture(InputNode::CaptureOwner::Consumer, false);
+        engine->inputNode->closeOwnStreamForExternalDelivery();
+    } else {
+        engine->inputNode->acquireCapture(InputNode::CaptureOwner::Consumer, true);
     }
 
     engine->inputNode->setMonitoringEnabled(true);
@@ -870,6 +899,9 @@ void wma_set_audio_mode(WmaEngine* engine, int mode) {
     }
 
     auto audioMode = static_cast<watermelon_audio::AudioMode>(mode);
+
+    // El modo adjunta/suelta la captura del nodo y re-prepara: ver captureLifecycleMutex.
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
 
     try {
         switch (audioMode) {
@@ -957,14 +989,21 @@ bool wma_mode_requires_input(int mode) {
  */
 bool wma_input_start(WmaEngine* engine) {
     if (!engine) return false;
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
     if (!ensureInputNode(engine)) return false;
 
-    if (engine->inputNode->startInputStream()) {
+    using Acquire = InputNode::CaptureAcquire;
+    const auto acquired =
+        engine->inputNode->acquireCapture(InputNode::CaptureOwner::Consumer, true);
+    if (acquired != Acquire::NotRunning) {
         wmaReconfigureTrasArrancarCaptura(engine);   // REQ-012.4 — ver el helper
         return true;
     }
 
-    if (!engine->backendManager) return false;
+    if (!engine->backendManager) {
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Consumer);
+        return false;
+    }
 
     // The caller explicitly asked for the microphone, so a stream reopen is
     // authorized: every backend decides on capture when it opens. The mode path
@@ -979,7 +1018,12 @@ bool wma_input_start(WmaEngine* engine) {
         /*allowRestart=*/true);
 
     using Outcome = watermelon_audio::BackendManager::CaptureOutcome;
-    return outcome == Outcome::LIVE || outcome == Outcome::PENDING;
+    if (outcome == Outcome::LIVE || outcome == Outcome::PENDING) return true;
+
+    // Fallo informado: el consumidor no va a llamar `stop()`, asi que su bit no puede quedar
+    // puesto (taparia el cierre del afinador). En esta rama la captura propia no corre.
+    engine->inputNode->releaseCapture(InputNode::CaptureOwner::Consumer);
+    return false;
 }
 
 bool wma_input_is_starting(const WmaEngine* engine) {
@@ -989,9 +1033,12 @@ bool wma_input_is_starting(const WmaEngine* engine) {
 
 void wma_input_stop(WmaEngine* engine) {
     if (!engine) return;
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
 
+    // Suelta SÓLO al dueño Consumer: si el afinador sigue corriendo, la captura sigue
+    // abierta (REQ-054.1).
     if (engine->inputNode) {
-        engine->inputNode->stopInputStream();
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Consumer);
     }
 
     // Withdraw the request either way: on the backend-capture path there is no
@@ -1016,7 +1063,9 @@ bool wma_input_is_running(const WmaEngine* engine) {
 }
 
 void wma_input_set_source(WmaEngine* engine, int source) {
-    if (!engine || !engine->inputNode) return;
+    if (!engine) return;
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
+    if (!engine->inputNode) return;
     if (source < 0 || source > 2) {
         WMA_LOGE("wma_input_set_source: invalid source %d", source);
         return;
@@ -1148,6 +1197,9 @@ bool wmaEnsureAnalysis(WmaEngine* e) {
 
 bool wma_tuner_start(WmaEngine* engine) {
     if (!engine || !engine->engine) return false;
+    // Start y stop ENTEROS bajo este lock: «bit Tuner <=> afinador corriendo» se rompe si
+    // un stop se intercala entre el acquire y el arranque del analisis. Ver el mutex.
+    std::lock_guard<std::mutex> lifecycle(engine->captureLifecycleMutex);
     if (!wmaEnsureInputNode(engine)) return false;   // sin captura no hay que analizar
     if (!wmaEnsureAnalysis(engine)) return false;
 
@@ -1166,15 +1218,17 @@ bool wma_tuner_start(WmaEngine* engine) {
     // pedir un afinador.
     engine->engine->setInputNode(engine->inputNode);
 
-    // Cuando el backend NO entrega la captura por `onAudioReady` (o sea todo lo
-    // que no es USB), la entrada llega por un stream propio del nodo y hay que
-    // abrirlo. En el host devuelve false y no pasa nada: ahi la captura entra
-    // por el callback, que es justo el otro brazo de este if.
-    const auto backendType = watermelon_audio::BackendManager::getInstance().getCurrentType();
+    // El afinador es el dueño Tuner de la captura (REQ-054.1). Cuando el backend NO
+    // entrega la captura por `onAudioReady` (o sea todo lo que no es USB), la entrada
+    // llega por un stream propio del nodo y hay que abrirlo; con USB sólo se registra
+    // al dueño. Sin captura propia (host sin fake) abrir falla y no pasa nada: ahi la
+    // captura entra por el callback.
+    const auto backendType = managerOf(engine).getCurrentType();
     const bool backendDeliversInput =
         (backendType == watermelon_audio::BackendType::LIBUSB);
-    if (!backendDeliversInput && !engine->inputNode->isInputStreamRunning()) {
-        engine->inputNode->startInputStream();
+    const auto acquired = engine->inputNode->acquireCapture(
+        InputNode::CaptureOwner::Tuner, !backendDeliversInput);
+    if (acquired == InputNode::CaptureAcquire::Opened) {
         // REQ-012.4 — EL CAMINO DEL AFINADOR EN ANDROID. Ver el helper: este stream
         // no pasa por el backend, asi que sin esto el DSP de entrada se queda con el
         // rate provisional justo en el caso de uso que motiva el REQ.
@@ -1182,7 +1236,10 @@ bool wma_tuner_start(WmaEngine* engine) {
     }
 
     std::lock_guard<std::mutex> lock(engine->analysisMutex);
-    if (!engine->analysisThread || !engine->analysisRing) return false;
+    if (!engine->analysisThread || !engine->analysisRing) {
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Tuner);
+        return false;
+    }
 
     // El rate MEDIDO, no el que se preparo: `getCaptureSampleRate()` devuelve 0
     // mientras no haya stream de entrada abierto, y ese 0 tiene que llegar tal
@@ -1198,18 +1255,36 @@ bool wma_tuner_start(WmaEngine* engine) {
     if (engine->inputNode) {
         engine->inputNode->setAnalysisRing(engine->analysisRing.get());
     }
-    return engine->analysisThread->isRunning();
+    if (engine->analysisThread->isRunning()) return true;
+
+    // El analisis no arranco: sin afinador corriendo no hay dueño Tuner. Soltarlo evita
+    // dejar el microfono abierto sin nadie que lo escuche (y sin escritor para el ring).
+    if (engine->inputNode) {
+        engine->inputNode->setAnalysisRing(nullptr);
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Tuner);
+    }
+    return false;
 }
 
 void wma_tuner_stop(WmaEngine* engine) {
     if (!engine) return;
+    std::lock_guard<std::mutex> lifecycle(engine->captureLifecycleMutex);
     // Desenganchar PRIMERO: el escritor deja de recibir trabajo antes de que el
     // lector se vaya. Al reves habria una ventana en que la captura sigue
     // llenando un ring que ya nadie drena.
     if (engine->inputNode) engine->inputNode->setAnalysisRing(nullptr);
-    std::lock_guard<std::mutex> lock(engine->analysisMutex);
-    if (engine->analysisThread) engine->analysisThread->stop();
+    {
+        std::lock_guard<std::mutex> lock(engine->analysisMutex);
+        if (engine->analysisThread) engine->analysisThread->stop();
+    }
     // El ring y el snapshot NO se liberan: ver la nota en watermelon_audio_internal.h.
+    //
+    // Recien con el analisis parado se suelta al dueño Tuner: si era el ultimo, la
+    // captura se cierra ANTES de devolver. Si hay un consumidor (AudioInput o el modo)
+    // la captura sigue abierta para el.
+    if (engine->inputNode) {
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Tuner);
+    }
 }
 
 bool wma_tuner_is_running(const WmaEngine* engine) {
@@ -1296,6 +1371,127 @@ bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values) {
     // salio desgarrada. Devolver ceros seria devolver una medicion que nadie
     // hizo — la leccion de los dos stubs que mentian.
     return engine->analysisSnapshot->read(out_values);
+}
+
+/* ================================================================
+ * 12c. Diagnostico, sin contrato (REQ-055 S0)
+ * ================================================================ */
+
+static_assert(WMA_TUNER_DUMP_STATS_VALUES == wma::analysis::kInputDumpStatsValues,
+              "WMA_TUNER_DUMP_STATS_VALUES quedo desincronizado de kInputDumpStatsValues");
+static_assert(sizeof(".invalid.wav") - sizeof(".wav") == 8 && sizeof(".part") - 1 <= 8,
+              "WMA_TUNER_DUMP_PATH_CAPACITY suma 8: el sufijo mas largo que una toma agrega");
+static_assert(WMA_TUNER_DUMP_PATH_CAPACITY == WMA_TUNER_DUMP_PATH_MAX + 8 + 1,
+              "WMA_TUNER_DUMP_PATH_CAPACITY es el path mas largo, su sufijo y el terminador");
+
+#if defined(WMA_TEST_HOOKS)
+std::atomic<int> gTunerDumpForcedMailboxTimeouts{0};
+#endif
+
+namespace {
+
+/// El buzon del volcado (`AnalysisThread::setInputDump`), con la compuerta de test que informa un
+/// techo vencido. Bajo `analysisMutex`.
+bool tunerDumpMailbox(WmaEngine* engine, wma::analysis::TunerInputDump* dump) {
+    const bool applied = engine->analysisThread->setInputDump(dump);
+#if defined(WMA_TEST_HOOKS)
+    int forced = gTunerDumpForcedMailboxTimeouts.load(std::memory_order_acquire);
+    while (forced > 0) {
+        if (gTunerDumpForcedMailboxTimeouts.compare_exchange_weak(forced, forced - 1,
+                                                                  std::memory_order_acq_rel)) {
+            return false;
+        }
+    }
+#endif
+    return applied;
+}
+
+/// Un start que devuelve false no deja nada de su toma (bug B). Si el borrado no pudo, se dice.
+void abortRefusedTunerDump(wma::analysis::TunerInputDump& dump) {
+    if (dump.abortTake()) return;
+    WMA_LOGE("wma_tuner_diag_input_dump_start: la toma rechazada dejo '%s' en disco "
+             "(no se pudo borrar, o el nombre ya no es el archivo que se creo)",
+             dump.abortResidue().c_str());
+}
+
+}  // namespace
+
+bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path) {
+    if (!engine || !path || path[0] == '\0') return false;
+    // El tope de largo hace que el archivo que una toma deja siempre quepa en
+    // WMA_TUNER_DUMP_PATH_CAPACITY (el contrato de stop).
+    if (std::strlen(path) > WMA_TUNER_DUMP_PATH_MAX) return false;
+    // El volcado solo crea `.wav` (hallazgo 1): el path lo arma la app y no puede usarse para
+    // crear un archivo de cualquier nombre. El sink, ademas, nunca pisa uno que ya exista.
+    if (!wma::analysis::hasWavExtension(path)) return false;
+    if (!wmaEnsureAnalysis(engine)) return false;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread) return false;
+    try {
+        if (!engine->tunerInputDump) {
+            engine->tunerInputDump = std::make_unique<wma::analysis::TunerInputDump>();
+        }
+        wma::analysis::TunerInputDump& dump = *engine->tunerInputDump;
+        if (dump.takeActive()) return false;
+
+        // La fuente de ESTA toma: si cambia a mitad, el analisis lo anota como discontinuidad.
+        // Un false de `beginTake` no deja nada en disco: o no abrio, o aborto lo que abrio.
+        if (!dump.beginTake(std::make_unique<wma::analysis::WavFileDumpSink>(), path,
+                            wma_input_get_source(engine))) {
+            if (!dump.abortResidue().empty()) {
+                WMA_LOGE("wma_tuner_diag_input_dump_start: la toma rechazada dejo '%s' en disco",
+                         dump.abortResidue().c_str());
+            }
+            return false;
+        }
+        if (tunerDumpMailbox(engine, &dump)) return true;
+
+        // El hilo no aplico el armado. Se pide el desarme; con el productor confirmado desarmado
+        // (la precondicion de `abortTake`) la toma se ABORTA: este start devuelve false, y un
+        // false no deja archivos (bug B: cerrarla dejaba un `.invalid.wav` que nadie reportaba y
+        // que bloqueaba el nombre). Si el desarme tampoco se confirma, el productor puede seguir
+        // escribiendo y nada se borra: la toma queda activa y `stop` la cierra cuando el hilo
+        // vuelva, informando su archivo (stop).
+        if (tunerDumpMailbox(engine, nullptr)) abortRefusedTunerDump(dump);
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count,
+                                    char* out_path, int path_capacity) {
+    if (!engine || !out_values || count < WMA_TUNER_DUMP_STATS_VALUES) return false;
+    if (!out_path || path_capacity < WMA_TUNER_DUMP_PATH_CAPACITY) return false;
+    try {
+        std::string leftPath;
+        int64_t values[WMA_TUNER_DUMP_STATS_VALUES];
+        {
+            std::lock_guard<std::mutex> lock(engine->analysisMutex);
+            if (!engine->tunerInputDump || !engine->tunerInputDump->takeActive()) return false;
+            if (engine->analysisThread && !tunerDumpMailbox(engine, nullptr)) return false;
+
+            std::string finalPath;
+            const wma::analysis::InputDumpStats st =
+                engine->tunerInputDump->endTake(&finalPath, &leftPath);
+            values[0] = static_cast<int64_t>(st.framesWritten);
+            values[1] = static_cast<int64_t>(st.framesLost);
+            values[2] = static_cast<int64_t>(st.discontinuities);
+            values[3] = st.sampleRate;
+            values[4] = st.inputSource;
+            values[5] = st.valid ? 1 : 0;
+            values[6] = finalPath.empty() ? 0 : 1;
+        }
+        // El start acota el path: lo que la toma deja siempre cabe. Si no cupiera seria un
+        // invariante roto; se trunca en un borde de byte antes que escribir fuera del buffer.
+        const size_t n = std::min(leftPath.size(), static_cast<size_t>(path_capacity) - 1);
+        std::memcpy(out_path, leftPath.data(), n);
+        out_path[n] = '\0';
+        std::copy(values, values + WMA_TUNER_DUMP_STATS_VALUES, out_values);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 /**
@@ -1404,12 +1600,13 @@ float wma_input_get_monitoring_volume(const WmaEngine* engine) {
 
 void wma_input_release(WmaEngine* engine) {
     if (!engine) return;
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
     // Under the mutex, like wmaEnsureInputNode: creating and destroying the node
     // race against each other, and the JNI's releaseInputNode() (which used to
     // take this lock itself) now delegates here.
     std::lock_guard<std::mutex> lock(engine->inputNodeMutex);
     if (engine->inputNode) {
-        engine->inputNode->stopInputStream();
+        engine->inputNode->shutdownCapture();
         engine->inputNode.reset();
     }
 }
@@ -2223,6 +2420,17 @@ int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
     return written < 0 ? 0 : written;
 }
 
+int wma_detect_onsets(const float* interleaved_stereo, int frames, int sample_rate,
+                      int* out_onsets, int max_onsets, int hop_frames, float sensitivity) {
+    if (!interleaved_stereo || frames <= 0 || !out_onsets || max_onsets <= 0) return 0;
+    const int written = wma::onset::detect(
+        [interleaved_stereo](int frame, int channel) {
+            return interleaved_stereo[static_cast<size_t>(frame) * 2 + static_cast<size_t>(channel)];
+        },
+        frames, sample_rate, hop_frames, sensitivity, out_onsets, max_onsets);
+    return written < 0 ? 0 : written;
+}
+
 int wma_looper_analyze_pitch(const WmaEngine* engine, int track_index, float hop_ms,
                               int* out_frames, float* out_hz, float* out_confidence,
                               int max_points, int* out_hop_frames) {
@@ -2471,6 +2679,93 @@ WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
     }
 }
 
+/* ---------------- Programmed song (REQ-055 S11) ---------------- */
+
+namespace {
+
+WmaResult songResult(wm::SongStatus st) {
+    switch (st) {
+        case wm::SongStatus::Ok:               return WMA_OK;
+        case wm::SongStatus::OutOfRange:       return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+        case wm::SongStatus::InvalidOperation: return WMA_ERROR_INVALID_OPERATION;
+        case wm::SongStatus::Io:               return WMA_ERROR_IO;
+        case wm::SongStatus::UnsupportedFormat: return WMA_ERROR_UNSUPPORTED_FORMAT;
+        case wm::SongStatus::BudgetExceeded:   return WMA_ERROR_MEMORY_BUDGET;
+        case wm::SongStatus::OutOfMemory:      return WMA_ERROR_MEMORY;
+    }
+    return WMA_ERROR_UNKNOWN;
+}
+
+/// Pista, no prueba: el motor no tiene stream. El SongPlayer verifica antes de liberar sin esperar.
+bool songStreamStopped(const WmaEngine* engine) {
+    return static_cast<EngineState>(engine->engine->getEngineState()) == EngineState::Stopped;
+}
+
+static_assert(WMA_SONG_MAX_TRACKS == wm::kSongMaxTracks &&
+              WMA_SONG_MAX_CLIPS == wm::kSongMaxClips &&
+              WMA_SONG_MAX_SECTIONS == wm::kSongMaxSections &&
+              WMA_SONG_SILENCE == wm::kSongSilence,
+              "la C API de la cancion y el motor comparten los topes");
+
+}  // namespace
+
+WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sample_rate,
+                             int64_t region_start, int64_t region_end, int64_t loop_frames,
+                             int32_t* out_id) {
+    WMA_CHECK(engine);
+    if (path == nullptr || out_id == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    try {
+        int32_t id = -1;
+        const wm::SongStatus st = engine->engine->getAudioLooper().songLoadClip(
+            path, sample_rate, region_start, region_end, loop_frames,
+            engine->engine->isOffline(), id, songStreamStopped(engine));
+        if (st == wm::SongStatus::Ok) *out_id = id;
+        return songResult(st);
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+WmaResult wma_song_unload_clip(WmaEngine* engine, int32_t id) {
+    WMA_CHECK(engine);
+    return songResult(engine->engine->getAudioLooper().songUnloadClip(
+        id, engine->engine->isOffline(), songStreamStopped(engine)));
+}
+
+WmaResult wma_song_set_schedule(WmaEngine* engine, int64_t loop_frames,
+                                const WmaSongSection* sections, int32_t count,
+                                int64_t end_frame) {
+    WMA_CHECK(engine);
+    if (count < 0 || count > WMA_SONG_MAX_SECTIONS) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    if (count > 0 && sections == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    try {
+        // Copia a un buffer del control (la agenda tiene hasta 1024 secciones): el C struct y
+        // el del motor tienen el mismo layout, pero no se asume.
+        std::vector<wm::SongSection> converted(static_cast<size_t>(count));
+        for (int32_t k = 0; k < count; ++k) {
+            converted[static_cast<size_t>(k)].startFrame = sections[k].start_frame;
+            for (int t = 0; t < WMA_SONG_MAX_TRACKS; ++t) {
+                converted[static_cast<size_t>(k)].clip[t] = sections[k].clip[t];
+            }
+        }
+        return songResult(engine->engine->getAudioLooper().songSetSchedule(
+            loop_frames, converted.data(), count, end_frame, engine->engine->isOffline(),
+            songStreamStopped(engine)));
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+int32_t wma_song_get_section(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, -1);
+    return engine->engine->getAudioLooper().songGetSection();
+}
+
+int64_t wma_song_get_late_adoptions(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().songGetLateAdoptions();
+}
+
 bool wma_looper_import_track(WmaEngine* engine, int track_index,
                               const char* file_path, int sample_rate) {
     // Untouched: AudioLooper::importTrack is itself importTrackChecked with the
@@ -2617,7 +2912,7 @@ int wma_get_latency_report(const WmaEngine* engine, char* buffer, int buffer_siz
         // carries it and AudioEngine logs it at start— and the report threw it
         // away. On the USB path that left a latency report with no mention of
         // USB, which is the first thing you would want to know.
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = managerOf(engine);
         report += "Backend: ";
         report += watermelon_audio::backendTypeToString(manager.getCurrentType());
         report += "\n";
@@ -2677,18 +2972,22 @@ void wma_get_output_levels(const WmaEngine* engine, float* out_levels) {
  * 23. Configuration / Logging
  * ================================================================ */
 
-/* Static storage for C callback — bridged to C++ LogCallback. */
-static WmaLogCallback g_cLogCallback = nullptr;
+/* Static storage for C callback — bridged to C++ LogCallback.
+ *
+ * Atomic since REQ-055 S2: it is process-wide (shared by every engine instance)
+ * and read from whatever thread logs, so a plain pointer written by
+ * wma_set_log_callback while another instance logs was a data race. */
+static std::atomic<WmaLogCallback> g_cLogCallback{nullptr};
 
 static void wmaLogBridge(wma::LogLevel level, const char* tag, const char* msg) {
-    WmaLogCallback cb = g_cLogCallback;
+    WmaLogCallback cb = g_cLogCallback.load(std::memory_order_acquire);
     if (cb) {
         cb(static_cast<WmaLogLevel>(static_cast<int>(level)), tag, msg);
     }
 }
 
 void wma_set_log_callback(WmaLogCallback callback) {
-    g_cLogCallback = callback;
+    g_cLogCallback.store(callback, std::memory_order_release);
     wma::setLogCallback(callback ? wmaLogBridge : nullptr);
 }
 
@@ -2738,4 +3037,233 @@ void wma_log_batch_free(WmaLogBatch* batch) {
 
 const char* wma_get_version(void) {
     return WMA_VERSION_STRING;
+}
+
+/* ================================================================
+ * 24. Offline render by handle (REQ-055 S2, ADR-0008)
+ * ================================================================
+ *
+ * Thin over AudioEngine::startOffline / renderBlock / stop, with two jobs the
+ * engine methods do not have: (1) TYPED errors instead of a bool, so a caller
+ * can tell "bad argument" from "wrong state"; (2) never touching a LIVE engine —
+ * an engine running on a device is refused, not stopped and not converted. */
+
+namespace {
+
+/// Running on a device (started by wma_engine_start), as opposed to offline.
+bool wmaRunsLive(const WmaEngine* e) {
+    const auto state = static_cast<EngineState>(e->engine->getEngineState());
+    return state != EngineState::Stopped && !e->engine->isOffline();
+}
+
+constexpr int kWmaOfflineMaxBlockFrames = 4096;   // AudioEngine::startOffline's cap
+
+}  // namespace
+
+WmaResult wma_offline_start(WmaEngine* engine, int sample_rate, int max_block_frames) {
+    WMA_CHECK(engine);
+    if (sample_rate <= 0 || max_block_frames <= 0 ||
+        max_block_frames > kWmaOfflineMaxBlockFrames) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    if (wmaRunsLive(engine)) {
+        WMA_LOGE("wma_offline_start: the engine is running on a device; refused");
+        return WMA_ERROR_INVALID_OPERATION;
+    }
+    // An offline instance never stays as the global BackendManager: if it was the
+    // first engine created it registered itself, and the handle-less backend calls
+    // would configure it instead of the live engine created later (review of S2).
+    if (engine->backendManager) {
+        watermelon_audio::BackendManager::clearGlobalIf(engine->backendManager.get());
+    }
+    // A restart is a stop + start: that is what makes the second render of an
+    // instance reproduce the first (startOffline resets the chain).
+    if (engine->engine->isOffline()) {
+        engine->engine->stop();
+    }
+    return engine->engine->startOffline(sample_rate, max_block_frames)
+               ? WMA_OK
+               : WMA_ERROR_INVALID_OPERATION;
+}
+
+WmaResult wma_offline_render(WmaEngine* engine, float* output, const float* input,
+                             int frames) {
+    WMA_CHECK(engine);
+    if (!engine->engine->isOffline()) {
+        return WMA_ERROR_INVALID_OPERATION;
+    }
+    if (output == nullptr || frames <= 0 ||
+        frames > engine->engine->offlineMaxBlockFrames()) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    return engine->engine->renderBlock(output, input, frames)
+               ? WMA_OK
+               : WMA_ERROR_INVALID_OPERATION;
+}
+
+WmaResult wma_offline_render_taps(WmaEngine* engine, float* mix, float* fx_return, float* tracks,
+                                  int32_t track_count, int frames) {
+    WMA_CHECK(engine);
+    if (!engine->engine->isOffline()) {
+        return WMA_ERROR_INVALID_OPERATION;
+    }
+    if (mix == nullptr || fx_return == nullptr || frames <= 0 ||
+        frames > engine->engine->offlineMaxBlockFrames() || track_count < 0 ||
+        track_count > engine->engine->getAudioLooper().getMaxActiveTracks() ||
+        (track_count > 0 && tracks == nullptr)) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    return engine->engine->renderBlockTaps(mix, fx_return, tracks, track_count, frames)
+               ? WMA_OK
+               : WMA_ERROR_INVALID_OPERATION;
+}
+
+WmaResult wma_offline_stop(WmaEngine* engine) {
+    WMA_CHECK(engine);
+    if (wmaRunsLive(engine)) {
+        WMA_LOGE("wma_offline_stop: the engine is running on a device; refused");
+        return WMA_ERROR_INVALID_OPERATION;
+    }
+    if (engine->engine->isOffline()) {
+        engine->engine->stop();
+    }
+    return WMA_OK;
+}
+
+// ========== 25. Song mix, master and output profiles (REQ-055 S12, ADR-0013) ==========
+
+struct WmaMaster {
+    wm::MasterStage stage;
+};
+
+namespace {
+
+bool wmaInRange(float v, float lo, float hi) {
+    return std::isfinite(v) && v >= lo && v <= hi;
+}
+
+bool wmaValidMaster(const WmaMixMaster& m) {
+    return wmaInRange(m.gain_db, -60.0f, 40.0f) && wmaInRange(m.ceiling_dbtp, -20.0f, 0.0f) &&
+           wmaInRange(m.release_ms, 1.0f, 2000.0f);
+}
+
+wm::MasterParams wmaMasterParams(const WmaMixMaster& m) {
+    wm::MasterParams p;
+    p.gainDb = m.gain_db;
+    p.ceilingDbtp = m.ceiling_dbtp;
+    p.releaseMs = m.release_ms;
+    return p;
+}
+
+}  // namespace
+
+WmaResult wma_mix_set_track(WmaEngine* engine, int32_t track, float gain, float pan, float send) {
+    WMA_CHECK(engine);
+    if (track < 0 || track >= engine->engine->getAudioLooper().getMaxActiveTracks() ||
+        !wmaInRange(gain, 0.0f, 2.0f) || !wmaInRange(pan, -1.0f, 1.0f) ||
+        !wmaInRange(send, 0.0f, 1.0f)) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    return engine->engine->setSongMixTrack(track, gain, pan, send) ? WMA_OK : WMA_ERROR_MEMORY;
+}
+
+WmaResult wma_mix_set_space(WmaEngine* engine, const WmaMixSpace* space) {
+    WMA_CHECK(engine);
+    if (space == nullptr || !wmaInRange(space->reverb_return, 0.0f, 1.0f) ||
+        !wmaInRange(space->reverb_size, 0.1f, 2.0f) ||
+        !wmaInRange(space->reverb_decay_s, 0.1f, 10.0f) ||
+        !wmaInRange(space->reverb_damping, 0.0f, 0.95f) ||
+        !wmaInRange(space->reverb_predelay_ms, 0.0f, 100.0f) ||
+        !wmaInRange(space->reverb_low_cut_hz, 20.0f, 500.0f) ||
+        !wmaInRange(space->reverb_high_cut_hz, 1000.0f, 20000.0f) ||
+        !wmaInRange(space->delay_return, 0.0f, 1.0f) ||
+        !wmaInRange(space->delay_time_ms, 1.0f,
+                    std::min(2000.0f, engine->engine->songDelayMaxMs())) ||
+        !wmaInRange(space->delay_feedback, 0.0f, 0.9f)) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    wm::SongSpaceParams p;
+    p.reverbReturn = space->reverb_return;
+    p.reverbSize = space->reverb_size;
+    p.reverbDecayS = space->reverb_decay_s;
+    p.reverbDamping = space->reverb_damping;
+    p.reverbPreDelayMs = space->reverb_predelay_ms;
+    p.reverbLowCutHz = space->reverb_low_cut_hz;
+    p.reverbHighCutHz = space->reverb_high_cut_hz;
+    p.delayReturn = space->delay_return;
+    p.delayTimeMs = space->delay_time_ms;
+    p.delayFeedback = space->delay_feedback;
+    return engine->engine->setSongMixSpace(p) ? WMA_OK : WMA_ERROR_MEMORY;
+}
+
+WmaResult wma_mix_set_master(WmaEngine* engine, const WmaMixMaster* master) {
+    WMA_CHECK(engine);
+    if (master == nullptr || !wmaValidMaster(*master)) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    engine->engine->setMasterStageParams(wmaMasterParams(*master));
+    return WMA_OK;
+}
+
+WmaResult wma_mix_set_output_profile(WmaEngine* engine, WmaOutputProfile profile) {
+    WMA_CHECK(engine);
+    if (profile != WMA_OUTPUT_PROTECTED && profile != WMA_OUTPUT_MASTER &&
+        profile != WMA_OUTPUT_RAW) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    return engine->engine->setOutputProfile(static_cast<AudioEngine::OutputProfile>(profile))
+               ? WMA_OK
+               : WMA_ERROR_INVALID_OPERATION;
+}
+
+int32_t wma_mix_get_master_latency_frames(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->masterStageLatencyFrames();
+}
+
+int32_t wma_get_xrun_count(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getXRunCount();
+}
+
+WmaMaster* wma_master_create(int sample_rate) {
+    if (sample_rate < wm::MasterStage::kMinSampleRate ||
+        sample_rate > wm::MasterStage::kMaxSampleRate) {
+        return nullptr;
+    }
+    try {
+        auto* m = new WmaMaster();
+        m->stage.prepareMaster(sample_rate);
+        return m;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+WmaResult wma_master_configure(WmaMaster* master, const WmaMixMaster* params) {
+    if (master == nullptr) return WMA_ERROR_NOT_INITIALIZED;
+    if (params == nullptr || !wmaValidMaster(*params)) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    master->stage.configureMaster(wmaMasterParams(*params));
+    return WMA_OK;
+}
+
+WmaResult wma_master_reset(WmaMaster* master) {
+    if (master == nullptr) return WMA_ERROR_NOT_INITIALIZED;
+    master->stage.resetMaster();
+    return WMA_OK;
+}
+
+WmaResult wma_master_process(WmaMaster* master, float* inout, int frames) {
+    if (master == nullptr) return WMA_ERROR_NOT_INITIALIZED;
+    if (inout == nullptr || frames <= 0 || frames > WMA_MASTER_MAX_FRAMES) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    master->stage.processMaster(inout, frames);
+    return WMA_OK;
+}
+
+int32_t wma_master_get_latency_frames(const WmaMaster* master) {
+    return master == nullptr ? 0 : master->stage.latencyFrames();
+}
+
+void wma_master_destroy(WmaMaster* master) {
+    delete master;
 }

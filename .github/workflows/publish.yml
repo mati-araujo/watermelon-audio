@@ -54,7 +54,12 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v7
+      # Sin credenciales persistidas (REQ-047 S4, 4.13, del security-auditor): este job
+      # tiene `packages: write`, y ningun paso usa git autenticado. El token lo reciben
+      # por env sólo la espera del CI (`gh api`) y el publish de Gradle.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # La garantia que venia del job `publish` de release-please.yml. Se saltea
       # solo si quien dispara lo pidio: el default es esperar.
@@ -68,6 +73,11 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # REQ-047 S4 — el Xcode que construye lo publicado lo fija
+      # .github/toolchain-pins.json, no el default de la imagen, y queda en el log.
+      - name: Fijar Xcode (toolchain-pins.json)
+        run: bash scripts/ci-select-xcode.sh
+
       - name: Verify tag matches Gradle version
         run: |
           GRADLE_VERSION="$(grep '^version=' gradle.properties | cut -d= -f2-)"
@@ -78,7 +88,7 @@ jobs:
           fi
 
       # cmake/ninja de sistema para el build iOS (scripts/build-ios.sh). NO es el
-      # "cmake;3.22.1" del Android SDK más abajo: ese no está en PATH y es para AGP.
+      # "cmake;<version>" del Android SDK (catálogo) más abajo: ese no está en PATH y es para AGP.
       - name: Install C++ build tools
         run: |
           for tool in cmake ninja; do
@@ -90,7 +100,7 @@ jobs:
           done
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: 17
@@ -98,7 +108,7 @@ jobs:
       # Necesario aunque el foco sea iOS: el módulo aplica com.android.library, así
       # que sin SDK Gradle ni configura el proyecto.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         # Solo `platform-tools`: el default de la action es `tools platform-tools`, y el
         # paquete obsoleto `tools` DESAPARECIO del repositorio de Google el 2026-09-14
         # (entre las 20:16 y las 20:43 UTC: verde en el PR de release 2.17.3, rojo en el
@@ -110,24 +120,55 @@ jobs:
 
       - name: Install NDK and CMake
         run: |
+          # Las versiones salen del catalogo (REQ-047 S3): una sola fuente para el
+          # build (build-logic) y para lo que se instala aca.
+          PKGS="$(python3 scripts/android-sdk-packages.py)"
+          echo "Paquetes del catalogo:" $PKGS
           yes | sdkmanager --licenses > /dev/null 2>&1
-          sdkmanager --install \
-            "ndk;28.2.13676358" \
-            "cmake;3.22.1"
+          sdkmanager --install $PKGS
+          # Cada paquete pedido, con SU version, tiene que figurar instalado. La
+          # imagen del runner trae otros NDK: un grep generico no probaria nada.
+          INSTALLED="$(sdkmanager --list_installed)"
+          for p in $PKGS; do
+            printf '%s\n' "$INSTALLED" | grep -F " $p " \
+              || { echo "::error::$p no figura instalado"; exit 1; }
+          done
 
       # ~1 GB por corrida sin cache.
       - name: Cache Kotlin/Native toolchain
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.konan
           key: ${{ runner.os }}-konan-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: ${{ runner.os }}-konan-
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Build release
         run: ./gradlew :audio:assembleRelease
+
+      # MINI-036 (D7) — lo que se va a publicar compila con las flags de release
+      # y sale strippeado. Es el MISMO chequeo del job `build` de ci.yml y de
+      # gate.sh, repetido aca porque este workflow no corre en el PR: es la
+      # ultima puerta antes de que el AAR llegue a GitHub Packages. Desde que se
+      # saco -Wl,--strip-all, que el .so del AAR no lleve .debug_*/.symtab
+      # depende solo del strip de AGP, y esto lo vigila. Falla cerrado.
+      #
+      # Por que no puede dar un rojo falso en ESTE runner: todo lo que el chequeo
+      # necesita ya lo usa el paso de arriba. Toma ninja y llvm-readelf del
+      # CMakeCache.txt del propio build: el ninja del CMake y el readelf del NDK
+      # que "Install NDK and CMake" instala desde el catalogo (binarios
+      # universales x86_64/arm64); si el build corrio, esas rutas existen. El
+      # self-test busca un ninja en el PATH (lo garantiza "Install C++ build
+      # tools") o en $ANDROID_HOME/cmake. python3 viene en la imagen de macOS
+      # (el job `ios` de ci.yml ya lo usa sin instalarlo). Es el mismo sistema
+      # operativo y la misma forma de rutas que gate.sh, que lo corre en cada PR.
+      - name: Flags del release nativo — self-test
+        run: python3 scripts/check-release-flags.py --self-test
+
+      - name: Flags del release nativo — MINI-036
+        run: python3 scripts/check-release-flags.py
 
       - name: Publish to GitHub Packages
         run: ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository

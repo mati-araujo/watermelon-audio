@@ -1,0 +1,58 @@
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=plan step=inicio ok=true plan=salida,captura,sf2,sf3,usb semilla=1787862246 semilla-origen=script
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=salida step=start ok=true lifecycle=RUNNING error=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=salida step=stream ok=true rate=48000 buffer=240 canales=2 latencia-ms=11.193228721618652 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=salida step=frames ok=true delta=24240 ventana-ms=500 esperado-aprox=24000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=captura step=precondicion ok=true id=mic-abre cumplida=true evidencia=aceptado:true,corriendo:true,espera-ms:0
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=captura step=start ok=true aceptado=true corriendo=true espera-ms=0 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=captura step=nivel ok=true l-db=-24.089512 r-db=-23.530407 pico=0.06660084 latencia-ms=8.0 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=captura step=stop ok=true
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=fixture ok=true archivo=wma-fixture.sf2 bytes=88744 sha256=45b2aa30a64ae4beba03c08fffad082788a6e26e21bbaa1151cd261b6bf937c2
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=carga ok=true archivo=wma-fixture.sf2 cargado=true presets=1
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=preset ok=true indice=0 nombre=WMA_fixture bank=0 program=0
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=nota ok=true nota=69 preset=0 pico-antes=0.0000 pico-durante=0.2546 frames=19440 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=escuchar ok=true n=1 de=2 estimulo=A4-440Hz ruta=sistema en-ms=4000 ventana-ms=2000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=control ok=true n=1 de=2 tipo=silencio ruta=sistema backend=NONE ventana-ms=2000 frames=119520 pico=0.0000 pausa-ms=12000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=escuchar ok=true n=2 de=2 estimulo=A4-440Hz ruta=sistema en-ms=4000 ventana-ms=2000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=estimulo ok=true n=2 de=2 sono=A4 hz=440 nota=69 archivo=wma-fixture.sf2 preset=0 ruta=sistema backend=NONE ventana-ms=2000 frames=110400 pico=0.2670 pausa-ms=12000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=descarga ok=true queda-cargado=false
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=fixture ok=true archivo=no-soundfont.sf2 bytes=35 sha256=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf2 step=no-soundfont ok=true archivo=no-soundfont.sf2 cargado=false queda-cargado=false
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=fixture ok=true archivo=wma-fixture.sf3 bytes=8026 sha256=07056bf31dda9f29bb54595dafd387e04ed48686e37c201686beda3ccedfcf0b
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=carga ok=true archivo=wma-fixture.sf3 cargado=true presets=1
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=preset ok=true indice=0 nombre=WMA_fixture bank=0 program=0
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=nota ok=true nota=69 preset=0 pico-antes=0.0000 pico-durante=0.1812 frames=19440 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=escuchar ok=true n=1 de=2 estimulo=A4-440Hz ruta=sistema en-ms=4000 ventana-ms=2000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=estimulo ok=true n=1 de=2 sono=A4 hz=440 nota=69 archivo=wma-fixture.sf3 preset=0 ruta=sistema backend=NONE ventana-ms=2000 frames=109440 pico=0.1895 pausa-ms=12000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=escuchar ok=true n=2 de=2 estimulo=A4-440Hz ruta=sistema en-ms=4000 ventana-ms=2000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=control ok=true n=2 de=2 tipo=silencio ruta=sistema backend=NONE ventana-ms=2000 frames=110880 pico=0.0000 pausa-ms=12000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=sf3 step=descarga ok=true queda-cargado=false
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=fixture ok=true archivo=wma-fixture.sf2 bytes=88744 sha256=45b2aa30a64ae4beba03c08fffad082788a6e26e21bbaa1151cd261b6bf937c2
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=carga ok=true archivo=wma-fixture.sf2 cargado=true presets=1
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=preset ok=true indice=0 nombre=WMA_fixture bank=0 program=0
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=motor-parado ok=true estado-motor=0 espera-ms=0 error=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=dispositivos ok=true cantidad=1 lista=2B89:64EC|Realtek_UGREEN_CM720_USB_Audio|UAC1|captura=false host-soportado=true
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=precondicion ok=true id=permiso-usb cumplida=true evidencia=ya-concedido
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=permiso ok=true origen=ya-concedido dispositivo=2B89:64EC
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=conectar ok=true fd=93 listo=true uac=2 usbfs=/dev/bus/usb/001/003 estado=CONNECTED error=- mensaje=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=motor-callback ok=true verificado=inicializado preparado-por=libreria inicializado=true estado-motor=0 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=capacidades ok=true rates=44100,48000,96000,192000,384000 bits=16,24,32 canales-out=2 canales-in=0 sync=ADAPTIVE full-duplex=false captura=false error=- mensaje=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=descriptores ok=true uac=2 alt-playback=3 alt-captura=0 relojes=1 formatos-playback=1/1:2ch16b@,1/2:2ch24b@,1/3:2ch32b@ motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=backend ok=true pedido=LIBUSB select-devolvio=true reporta=LIBUSB
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=wake-lock ok=true concedido=true declarado-por-el-harness=false origen=merge-del-manifest-de-audio motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=streaming-start ok=true rate=48000 canales=2 bits=24 estado=STREAMING error=- mensaje=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=streaming-stats ok=true enviados=16576 completados=16384 en-vuelo=192 errores=0 underruns=0 overruns=0 rate-pedido=48000 rate-real=0.0 rate-verificable=false latencia-ms=37.37789535522461 techo-ms=61.33333206176758 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=reconectar-mismo ok=true resultado=exito fd-antes=93 fd-despues=93 estado=STREAMING completados-antes=16448 completados-despues=17856 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=conectar-otro ok=true device-id=1003-falso resultado=DEVICE_BUSY estado=STREAMING fd=93 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=suite-1 ok=true test=PLAYBACK_TONE estado=PASSED trafico=true muestras=48 rate-config=48000 rate-stream=48000 bits-config=16 rate-real=0.0 paquetes=40960 ok-paquetes=40768 en-vuelo=192 exito-pct=100.0 underruns=0 overruns=0 errores=0 latencia-ms=37.41844039267682 techo-ms=61.33333206176758 restauracion=RESTORED restauracion-msg=- traba-ms=132 mensaje=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=suite-2 ok=true test=PLAYBACK_TONE estado=PASSED trafico=true muestras=48 rate-config=44100 rate-stream=44100 bits-config=16 rate-real=0.0 paquetes=40832 ok-paquetes=40640 en-vuelo=192 exito-pct=100.0 underruns=0 overruns=0 errores=0 latencia-ms=37.19110383378698 techo-ms=59.93197250366211 restauracion=RESTORED restauracion-msg=- traba-ms=140 mensaje=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=suite-3 ok=true test=PLAYBACK_TONE estado=PASSED trafico=true muestras=48 rate-config=96000 rate-stream=96000 bits-config=24 rate-real=0.0 paquetes=40896 ok-paquetes=40704 en-vuelo=192 exito-pct=100.0 underruns=0 overruns=0 errores=0 latencia-ms=36.170212765957444 techo-ms=58.66666793823242 restauracion=RESTORED restauracion-msg=- traba-ms=144 mensaje=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=suite ok=true tests=3 medidas=3 pasaron=3 no-aplican=0 esperados=3 stream-despues=STREAMING
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=streaming-stop ok=true estado=CONNECTED
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=escuchar ok=true n=1 de=2 estimulo=A4-440Hz ruta=libusb en-ms=4000 ventana-ms=2000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=control ok=true n=1 de=2 tipo=silencio ruta=libusb backend=LIBUSB ventana-ms=2000 frames=109824 pico=0.0000 pausa-ms=12000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=escuchar ok=true n=2 de=2 estimulo=A4-440Hz ruta=libusb en-ms=4000 ventana-ms=2000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=estimulo ok=true n=2 de=2 sono=A4 hz=440 nota=69 archivo=wma-fixture.sf2 preset=0 ruta=libusb backend=LIBUSB ventana-ms=2000 frames=111104 pico=0.2660 pausa-ms=12000
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=backend-restaurado ok=true pedido=OBOE select-devolvio=true reporta=OBOE motivo=-
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=desconectar ok=true fd=-1 estado=DISCONNECTED
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=descarga ok=true queda-cargado=false
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=plan step=fin ok=true fallidos=- motor-detenido=true

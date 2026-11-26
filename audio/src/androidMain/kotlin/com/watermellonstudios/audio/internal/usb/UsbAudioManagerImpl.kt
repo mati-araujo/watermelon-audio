@@ -10,6 +10,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.watermellonstudios.audio.BuildConfig
 import com.watermellonstudios.audio.api.IUsbAudioManager
 import com.watermellonstudios.audio.domain.usb.*
@@ -17,6 +18,10 @@ import com.watermellonstudios.audio.domain.usb.UsbDeviceCompatibility
 import com.watermellonstudios.audio.internal.bridge.AudioNativeBridge
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import com.watermellonstudios.audio.internal.bridge.UsbStreamStartStatus
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 
 /**
@@ -26,11 +31,27 @@ import kotlin.coroutines.resume
  */
 internal class UsbAudioManagerImpl(
     private val context: Context,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-) : IUsbAudioManager {
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob()),
+    /**
+     * Las operaciones nativas de conexión y streaming (REQ-050 S2, D14). La costura existe para
+     * los tests de host del contrato de conexión; en producción es siempre el bridge.
+     */
+    private val nativePort: UsbNativePort = BridgeUsbNativePort(AudioNativeBridge.getInstance()),
+) : IUsbAudioManager, UsbActiveStreamSource {
 
     // Native bridge instance for USB audio operations
     private val nativeBridge = AudioNativeBridge.getInstance()
+
+    /**
+     * Serializa [connectDevice] (REQ-050 S2, D7). Lo toman el connect explícito y el auto-connect
+     * de la librería por igual: antes corrían en paralelo y el último re-inicializaba el backend
+     * libusb con otro fd en pleno streaming (MINI-041 #3).
+     *
+     * Cubre también la espera del diálogo de permiso, que no tiene techo (D13): mientras el
+     * usuario no conteste, cualquier otro `connectDevice` espera. Cancelar a quien llamó suelta
+     * el lock.
+     */
+    private val connectMutex = Mutex()
 
     companion object {
         private const val TAG = "UsbAudioManager"
@@ -40,6 +61,9 @@ internal class UsbAudioManagerImpl(
         private const val USB_CLASS_AUDIO = 1
         private const val USB_SUBCLASS_AUDIOCONTROL = 1
         private const val USB_SUBCLASS_AUDIOSTREAMING = 2
+
+        /** `EngineState::Stopped` de `core/AudioEngine.h`. */
+        private const val ENGINE_STATE_STOPPED = 0
     }
 
     // Android USB Manager
@@ -93,8 +117,18 @@ internal class UsbAudioManagerImpl(
     private var lastUnderrunSeverity = UsbHealthEvent.Severity.INFO
 
     // Permission request continuation
-    private var permissionContinuation: CancellableContinuation<Boolean>? = null
-    private var pendingPermissionDevice: UsbDevice? = null
+    /**
+     * La espera del diálogo de permiso, como UN par (MINI-042). Un CAS sobre la continuación sola
+     * dejaba al perdedor leer el device todavía en null y negar en vez de tomar el camino "pedido en
+     * curso". Todo registro y toda liberación pasan por `compareAndSet` sobre este par.
+     */
+    private class PendingPermission(val continuation: CancellableContinuation<Boolean>, val device: UsbDevice)
+
+    private val pendingPermission = AtomicReference<PendingPermission?>(null)
+
+    /** Costura de test (MINI-042): corre entre el chequeo de "pedido en curso" y el registro. En producción es null. */
+    @Volatile
+    internal var permissionRegistrationGate: (() -> Unit)? = null
 
     // Trusted devices repository for remembering user-approved devices
     private val trustedDevicesRepository by lazy {
@@ -152,14 +186,15 @@ internal class UsbAudioManagerImpl(
                         @Suppress("DEPRECATION")
                         intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     }
-                    val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                    // EXTRA_PERMISSION_GRANTED NO se lee (REQ-050, AC-050.2): lo puede escribir
+                    // cualquier app que mande este broadcast. Decide UsbManager, en
+                    // handlePermissionResult.
 
                     Log.i(TAG, "  device: ${device?.productName} (id=${device?.deviceId})")
-                    Log.i(TAG, "  granted: $granted")
-                    Log.i(TAG, "  pendingPermissionDevice: ${pendingPermissionDevice?.productName} (id=${pendingPermissionDevice?.deviceId})")
-                    Log.i(TAG, "  permissionContinuation is null: ${permissionContinuation == null}")
+                    val pendingNow = pendingPermission.get()
+                    Log.i(TAG, "  pendingPermission: ${pendingNow?.device?.productName} (id=${pendingNow?.device?.deviceId})")
 
-                    handlePermissionResult(device, granted)
+                    handlePermissionResult(device)
                 }
 
                 else -> {
@@ -236,8 +271,33 @@ internal class UsbAudioManagerImpl(
 
     // ==================== Device Selection ====================
 
-    override suspend fun connectDevice(device: UsbAudioDevice): UsbResult<Unit> {
+    override suspend fun connectDevice(device: UsbAudioDevice): UsbResult<Unit> =
+        connectMutex.withLock { connectDeviceLocked(device) }
+
+    /** El cuerpo de [connectDevice], con [connectMutex] tomado. */
+    private suspend fun connectDeviceLocked(device: UsbAudioDevice): UsbResult<Unit> {
         Log.d(TAG, "Connecting to device: ${device.displayName}")
+
+        // D7: un device ya conectado (o transmitiendo) no se vuelve a abrir. El mismo device es
+        // éxito sin tocar nada; otro es DEVICE_BUSY. Antes el segundo pedido re-inicializaba el
+        // backend con otro fd y destruía el stream vivo.
+        val current = _selectedDevice.value
+        val state = _connectionState.value
+        if (current != null &&
+            (state == UsbConnectionState.CONNECTED || state == UsbConnectionState.STREAMING) &&
+            nativePort.isUsbDeviceInitialized()
+        ) {
+            return if (current.deviceId == device.deviceId) {
+                Log.i(TAG, "connectDevice: ${device.displayName} is already connected ($state); nothing to do")
+                UsbResult.Success(Unit)
+            } else {
+                Log.w(TAG, "connectDevice: ${device.displayName} refused, ${current.displayName} is connected")
+                UsbResult.Failure(
+                    UsbAudioError.DEVICE_BUSY,
+                    "${current.displayName} is already connected; disconnect it first",
+                )
+            }
+        }
 
         // Find the actual USB device
         val usbDevice = findUsbDevice(device.deviceId)
@@ -278,15 +338,27 @@ internal class UsbAudioManagerImpl(
         _connectionState.value = UsbConnectionState.PERMISSION_GRANTED
         _deviceEvents.emit(UsbDeviceEvent.PermissionGranted(device))
 
+        // D6: el motor va ANTES que el device (AC-050.4). Sin motor, el backend libusb quedaría
+        // en el BackendManager de respaldo y se perdería al crearse el motor.
+        if (!prepareEngineForUsb()) {
+            _connectionState.value = UsbConnectionState.ERROR
+            _deviceEvents.emit(UsbDeviceEvent.Error(device.deviceId, UsbAudioError.NO_ENGINE))
+            return UsbResult.Failure(
+                UsbAudioError.NO_ENGINE,
+                "The audio engine could not be created; the USB device was not initialized",
+            )
+        }
+
         // Open connection
         return try {
             _connectionState.value = UsbConnectionState.CONNECTING
 
             val connection = usbManager.openDevice(usbDevice)
-                ?: return UsbResult.Failure(
-                    UsbAudioError.INTERNAL_ERROR,
-                    "Failed to open USB device"
-                )
+            if (connection == null) {
+                // Antes volvía dejando el estado en CONNECTING (review de REQ-050 S2).
+                _connectionState.value = UsbConnectionState.ERROR
+                return UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, "Failed to open USB device")
+            }
 
             currentConnection = connection
             currentFileDescriptor = connection.fileDescriptor
@@ -331,6 +403,27 @@ internal class UsbAudioManagerImpl(
         }
     }
 
+    /**
+     * D6 + D12 (REQ-050 S2). Con el motor ausente o PARADO: lo crea si hace falta e instala su
+     * callback en el `BackendManager`, para que el backend libusb que se inicializa después
+     * nazca en el manager del motor y con a quién pedirle audio. Con el motor CORRIENDO no lo
+     * toca: el nativo rechaza reconfigurarlo con el stream vivo, el motor ya existe (así que el
+     * backend cae en el manager correcto), y si al final falta el callback, `startStreaming` lo
+     * dice con [UsbAudioError.NO_AUDIO_CALLBACK].
+     *
+     * @return `false` si después de esto el motor sigue sin existir.
+     */
+    private fun prepareEngineForUsb(): Boolean {
+        if (nativePort.isEngineInitialized() && nativePort.engineState() != ENGINE_STATE_STOPPED) {
+            Log.i(TAG, "Engine is running: USB connect leaves it untouched (D12)")
+            return true
+        }
+        nativePort.installEngineCallback()
+        val ok = nativePort.isEngineInitialized()
+        if (!ok) Log.e(TAG, "Engine could not be created before initializing the USB device")
+        return ok
+    }
+
     override suspend fun disconnectDevice() {
         val device = _selectedDevice.value
         Log.d(TAG, "Disconnecting from device: ${device?.displayName}")
@@ -351,6 +444,8 @@ internal class UsbAudioManagerImpl(
             _selectedDevice.value = null
             _currentCapabilitySnapshot.value = null
             _selectedAltsetting = null
+            _selectedClockSourceId = null
+            _activeStreamConfig = null
             _connectionState.value = UsbConnectionState.DISCONNECTED
 
             device?.let {
@@ -388,88 +483,128 @@ internal class UsbAudioManagerImpl(
 
         // BUG FIX: Prevent concurrent permission requests (double dialog issue)
         // If there's already a pending permission request, wait for it or skip
-        if (permissionContinuation != null) {
-            Log.w(TAG, "Permission request already in progress for ${pendingPermissionDevice?.productName}")
-            // If requesting for the same device, wait for the existing request
-            if (pendingPermissionDevice?.deviceId == usbDevice.deviceId) {
-                Log.i(TAG, "Same device - waiting for existing permission request")
-                // Return true to allow caller to proceed (permission will be checked again)
-                return usbManager.hasPermission(usbDevice)
-            } else {
-                Log.w(TAG, "Different device - denying concurrent request")
-                return false
-            }
-        }
+        pendingPermission.get()?.let { return permissionRequestInProgress(it, usbDevice) }
+
+        permissionRegistrationGate?.invoke()
 
         return suspendCancellableCoroutine { cont ->
-            permissionContinuation = cont
-            pendingPermissionDevice = usbDevice
-
-            // IMPORTANT: Must use FLAG_MUTABLE because the system USB service needs to
-            // add EXTRA_PERMISSION_GRANTED to the intent when sending the result.
-            // FLAG_IMMUTABLE would prevent this modification and break permission handling.
-            val intent = Intent(ACTION_USB_PERMISSION).apply {
-                setPackage(context.packageName)
+            val mine = PendingPermission(cont, usbDevice)
+            // La decisión la da el CAS, no el chequeo de arriba: dos hilos pueden verlo vacío a la vez.
+            if (!pendingPermission.compareAndSet(null, mine)) {
+                val current = pendingPermission.get()
+                cont.resume(
+                    if (current != null) permissionRequestInProgress(current, usbDevice)
+                    // El pedido ajeno terminó entre el CAS y la lectura: nada en curso que esperar.
+                    else usbManager.hasPermission(usbDevice)
+                )
+                return@suspendCancellableCoroutine
             }
 
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
+            // MINI-042 (review M1): si pedir el diálogo LANZA, el lugar registrado se suelta antes
+            // de relanzar. Sin esto quedaba ocupado para siempre y todo pedido posterior se tomaba
+            // por "en curso" sin que nadie fuera a reanudarlo.
+            try {
+                // IMPORTANT: Must use FLAG_MUTABLE because the system USB service needs to
+                // add EXTRA_PERMISSION_GRANTED to the intent when sending the result.
+                // FLAG_IMMUTABLE would prevent this modification and break permission handling.
+                val intent = Intent(ACTION_USB_PERMISSION).apply {
+                    setPackage(context.packageName)
+                }
+
+                val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                } else {
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                }
+
+                val permissionIntent = PendingIntent.getBroadcast(
+                    context,
+                    0,
+                    intent,
+                    flags
+                )
+
+                Log.i(TAG, "  Action: $ACTION_USB_PERMISSION")
+                Log.i(TAG, "  Package: ${context.packageName}")
+                Log.i(TAG, "  Flags: $flags (FLAG_MUTABLE=${PendingIntent.FLAG_MUTABLE}, FLAG_UPDATE_CURRENT=${PendingIntent.FLAG_UPDATE_CURRENT})")
+                Log.i(TAG, "  Device: ${usbDevice.productName} (id=${usbDevice.deviceId})")
+                Log.i(TAG, "  isMonitoring: $isMonitoring")
+
+                usbManager.requestPermission(usbDevice, permissionIntent)
+            } catch (t: Throwable) {
+                pendingPermission.compareAndSet(mine, null)
+                throw t
             }
-
-            val permissionIntent = PendingIntent.getBroadcast(
-                context,
-                0,
-                intent,
-                flags
-            )
-
-            Log.i(TAG, "  Action: $ACTION_USB_PERMISSION")
-            Log.i(TAG, "  Package: ${context.packageName}")
-            Log.i(TAG, "  Flags: $flags (FLAG_MUTABLE=${PendingIntent.FLAG_MUTABLE}, FLAG_UPDATE_CURRENT=${PendingIntent.FLAG_UPDATE_CURRENT})")
-            Log.i(TAG, "  Device: ${usbDevice.productName} (id=${usbDevice.deviceId})")
-            Log.i(TAG, "  isMonitoring: $isMonitoring")
-
-            usbManager.requestPermission(usbDevice, permissionIntent)
             Log.i(TAG, "Permission dialog should now appear - waiting for user response...")
 
             cont.invokeOnCancellation {
                 Log.w(TAG, "Permission request cancelled")
-                permissionContinuation = null
-                pendingPermissionDevice = null
+                pendingPermission.compareAndSet(mine, null)
             }
         }
     }
 
-    private fun handlePermissionResult(device: UsbDevice?, granted: Boolean) {
-        Log.d(TAG, "handlePermissionResult called: device=${device?.productName}, granted=$granted")
+    private fun permissionRequestInProgress(current: PendingPermission, usbDevice: UsbDevice): Boolean {
+        Log.w(TAG, "Permission request already in progress for ${current.device.productName}")
+        return if (current.device.deviceId == usbDevice.deviceId) {
+            Log.i(TAG, "Same device - not requesting again")
+            // El caller sigue; el permiso se vuelve a chequear con lo que diga UsbManager.
+            usbManager.hasPermission(usbDevice)
+        } else {
+            Log.w(TAG, "Different device - denying concurrent request")
+            false
+        }
+    }
 
-        // Handle case where device is null but we have a pending request
-        if (device == null) {
-            Log.w(TAG, "Permission result received with null device")
-            // If we have a pending continuation, resume it with the granted value anyway
-            // Some devices/Android versions may not include the device in the result
-            if (permissionContinuation != null && pendingPermissionDevice != null) {
-                Log.i(TAG, "Resuming continuation despite null device (granted=$granted)")
-                permissionContinuation?.resume(granted)
-                permissionContinuation = null
-                pendingPermissionDevice = null
-            }
+    /**
+     * Resuelve la espera del diálogo de permiso con lo que dice [UsbManager], no con el intent
+     * (REQ-050, AC-050.1 y AC-050.2).
+     *
+     * El broadcast que llega acá lo puede mandar cualquier app, con el extra que quiera: el que
+     * decide es `usbManager.hasPermission(pendiente)`, que el sistema ya actualizó antes de mandar
+     * el resultado del diálogo. Cuatro casos:
+     * - sin espera pendiente, o con el resultado de OTRO device: se ignora;
+     * - con el permiso dado: se reanuda con `true`, traiga o no el device. Decide UsbManager, así
+     *   que un resultado sin device no cuesta nada aceptarlo;
+     * - sin permiso y CON el device: el usuario negó, se reanuda con `false`;
+     * - sin permiso y SIN device: se ignora y la espera sigue. No se distingue de un broadcast ajeno,
+     *   y reanudar con `false` le dejaría a cualquier app abortar una conexión en curso.
+     *
+     * Límites, dichos:
+     * - AOSP siempre pone `EXTRA_DEVICE` en el resultado. En un Android que lo omitiera, una
+     *   NEGACIÓN real caería en el último caso y la espera no terminaría: no tiene techo, y sólo la
+     *   corta cancelar a quien llamó.
+     * - Un broadcast ajeno que SÍ trae el device (cualquier app puede tomarlo de `deviceList`) y
+     *   llega sin permiso se lee como una negación y aborta la espera. Esa variante la cierra el
+     *   registro NO exportado de [startMonitoring], no esta función.
+     */
+    private fun handlePermissionResult(device: UsbDevice?) {
+        val registered = pendingPermission.get()
+        val pending = registered?.device
+        Log.d(TAG, "handlePermissionResult called: device=${device?.productName}, pending=${pending?.productName}")
+
+        if (registered == null || pending == null) {
+            Log.w(TAG, "Permission result without a pending request: ignored")
             return
         }
 
-        // Verify this is for our pending device
-        if (device.deviceId != pendingPermissionDevice?.deviceId) {
-            Log.w(TAG, "Permission result device mismatch: received=${device.deviceId}, pending=${pendingPermissionDevice?.deviceId}")
+        if (device != null && device.deviceId != pending.deviceId) {
+            Log.w(TAG, "Permission result device mismatch: received=${device.deviceId}, pending=${pending.deviceId}")
             return
         }
 
-        Log.i(TAG, "Permission result for ${device.productName}: $granted")
+        val granted = usbManager.hasPermission(pending)
+        if (!granted && device == null) {
+            Log.w(TAG, "Permission result without device and without permission in UsbManager: ignored, still waiting")
+            return
+        }
 
-        permissionContinuation?.resume(granted)
-        permissionContinuation = null
-        pendingPermissionDevice = null
+        Log.i(TAG, "Permission result for ${pending.productName}: $granted (UsbManager)")
+
+        // Sólo quien gana el CAS reanuda: dos entregas a la vez no pueden reanudar dos veces.
+        if (pendingPermission.compareAndSet(registered, null)) {
+            registered.continuation.resume(granted)
+        }
     }
 
     // ==================== Device Capabilities ====================
@@ -590,9 +725,8 @@ internal class UsbAudioManagerImpl(
      * side effect so subsequent reads have it.
      */
     override fun getCurrentCapabilitySnapshot(): UsbCapabilitySnapshot? {
-        val raw = nativeBridge.getUsbCapabilitySnapshot() ?: return _currentSnapshot
         return try {
-            val snapshot = UsbSnapshotCodec.decode(raw)
+            val snapshot = nativePort.capabilitySnapshot() ?: return _currentSnapshot
             _currentSnapshot = snapshot
             snapshot
         } catch (e: Exception) {
@@ -630,8 +764,17 @@ internal class UsbAudioManagerImpl(
         alternateSetting: Int,
         formatIndex: Int,
     ): UsbResult<Unit> {
-        if (formatIndex < 0) {
-            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "formatIndex must be >= 0")
+        // REQ-050 S3 (D17): el centinela EXACTO vuelve a la selección automática. Se valida acá y
+        // otra vez del lado C++ (classifyAltsettingRequest): cualquier otro negativo es rechazo.
+        if (isAutomaticAltsetting(interfaceNumber, alternateSetting, formatIndex)) {
+            return clearAltsettingSelection()
+        }
+        if (interfaceNumber < 0 || alternateSetting < 0 || formatIndex < 0) {
+            return UsbResult.Failure(
+                UsbAudioError.UNSUPPORTED_FORMAT,
+                "IF$interfaceNumber Alt$alternateSetting format $formatIndex: indices must be >= 0 " +
+                    "(or ${UsbStreamSelection.AUTOMATIC_ALTSETTING} in all three for the automatic choice)",
+            )
         }
         val snapshot = getCurrentCapabilitySnapshot()
             ?: return UsbResult.Failure(UsbAudioError.DESCRIPTOR_PARSE_ERROR, "No capability snapshot available")
@@ -649,9 +792,9 @@ internal class UsbAudioManagerImpl(
         }
 
         return withContext(Dispatchers.IO) {
-            val applied = nativeBridge.selectUsbAltsetting(interfaceNumber, alternateSetting, formatIndex)
+            val applied = nativePort.selectUsbAltsetting(interfaceNumber, alternateSetting, formatIndex)
             if (applied) {
-                _selectedAltsetting = SelectedAltsetting(interfaceNumber, alternateSetting, formatIndex)
+                _selectedAltsetting = UsbAltsettingSelection(interfaceNumber, alternateSetting, formatIndex)
                 UsbResult.Success(Unit)
             } else {
                 UsbResult.Failure(
@@ -682,8 +825,13 @@ internal class UsbAudioManagerImpl(
     }
 
     override suspend fun selectClockSource(clockSourceId: Int): UsbResult<Unit> {
-        if (clockSourceId <= 0) {
-            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "clockSourceId must be > 0")
+        // REQ-050 S3 (D17): 0 vuelve al reloj automático; un negativo sigue siendo rechazo, acá y
+        // del lado C++ (classifyClockSourceRequest).
+        if (clockSourceId == UsbStreamSelection.AUTOMATIC_CLOCK_SOURCE) {
+            return clearClockSourceSelection()
+        }
+        if (clockSourceId < 0) {
+            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "clockSourceId must be > 0 (or 0 for automatic)")
         }
         val snapshot = getCurrentCapabilitySnapshot()
             ?: return UsbResult.Failure(UsbAudioError.DESCRIPTOR_PARSE_ERROR, "No capability snapshot available")
@@ -698,7 +846,8 @@ internal class UsbAudioManagerImpl(
         }
 
         return withContext(Dispatchers.IO) {
-            if (nativeBridge.selectUsbClockSource(clockSourceId)) {
+            if (nativePort.selectUsbClockSource(clockSourceId)) {
+                _selectedClockSourceId = clockSourceId
                 UsbResult.Success(Unit)
             } else {
                 UsbResult.Failure(
@@ -710,13 +859,56 @@ internal class UsbAudioManagerImpl(
     }
 
     private var _currentStreamPreference: StreamPreference? = null
-    private var _selectedAltsetting: SelectedAltsetting? = null
+    @Volatile private var _selectedAltsetting: UsbAltsettingSelection? = null
 
-    private data class SelectedAltsetting(
-        val interfaceNumber: Int,
-        val alternateSetting: Int,
-        val formatIndex: Int,
-    )
+    /** REQ-050 S3 (D18): el reloj elegido a mano, para poder restaurarlo. null = automático. */
+    @Volatile private var _selectedClockSourceId: Int? = null
+
+    /** REQ-050 S3 (D18): la config del stream que corre, o null si no hay streaming. */
+    @Volatile private var _activeStreamConfig: UsbActiveStreamConfig? = null
+
+    override fun activeStreamConfig(): UsbActiveStreamConfig? = _activeStreamConfig
+
+    override fun manualSelection(): UsbManualSelection = UsbManualSelection(_selectedAltsetting, _selectedClockSourceId)
+
+    private fun isAutomaticAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean =
+        interfaceNumber == UsbStreamSelection.AUTOMATIC_ALTSETTING &&
+            alternateSetting == UsbStreamSelection.AUTOMATIC_ALTSETTING &&
+            formatIndex == UsbStreamSelection.AUTOMATIC_ALTSETTING
+
+    /**
+     * REQ-050 S3 (D17): olvida la selección manual de altsetting, en Kotlin (que la re-aplicaba
+     * en cada arranque) y en el nativo. Sólo con el stream parado, como la selección misma.
+     */
+    private suspend fun clearAltsettingSelection(): UsbResult<Unit> {
+        if (_connectionState.value == UsbConnectionState.STREAMING) {
+            return UsbResult.Failure(UsbAudioError.STREAMING_ERROR, "Stop the stream before changing the altsetting selection")
+        }
+        return withContext(Dispatchers.IO) {
+            val auto = UsbStreamSelection.AUTOMATIC_ALTSETTING
+            if (nativePort.selectUsbAltsetting(auto, auto, auto)) {
+                _selectedAltsetting = null
+                UsbResult.Success(Unit)
+            } else {
+                UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, "Native backend rejected clearing the altsetting selection")
+            }
+        }
+    }
+
+    /** REQ-050 S3 (D17): olvida el reloj elegido a mano. Sólo con el stream parado. */
+    private suspend fun clearClockSourceSelection(): UsbResult<Unit> {
+        if (_connectionState.value == UsbConnectionState.STREAMING) {
+            return UsbResult.Failure(UsbAudioError.STREAMING_ERROR, "Stop the stream before changing the clock source selection")
+        }
+        return withContext(Dispatchers.IO) {
+            if (nativePort.selectUsbClockSource(UsbStreamSelection.AUTOMATIC_CLOCK_SOURCE)) {
+                _selectedClockSourceId = null
+                UsbResult.Success(Unit)
+            } else {
+                UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, "Native backend rejected clearing the clock source selection")
+            }
+        }
+    }
 
     private fun passesHardConstraints(
         snapshot: UsbCapabilitySnapshot,
@@ -798,16 +990,17 @@ internal class UsbAudioManagerImpl(
             addAction(ACTION_USB_PERMISSION)
         }
 
-        // IMPORTANT: Must use RECEIVER_EXPORTED to receive USB permission results
-        // from the system UsbService. The permission broadcast comes from the system,
-        // not from our app, so RECEIVER_NOT_EXPORTED would block it.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
-            Log.i(TAG, "BroadcastReceiver registered with RECEIVER_EXPORTED flag (Android 13+)")
-        } else {
-            context.registerReceiver(usbReceiver, filter)
-            Log.i(TAG, "BroadcastReceiver registered (pre-Android 13)")
-        }
+        // NO exportado (REQ-050, D4): exportado, cualquier app podía mandarle el resultado del
+        // permiso. Los que tienen que seguir llegando llegan igual: el resultado del diálogo lo
+        // entrega un PendingIntent NUESTRO (setPackage, más abajo), o sea con nuestro uid, y
+        // ATTACHED/DETACHED son broadcasts protegidos del sistema. En API < 33 ContextCompat lo
+        // protege con el permiso de firma <paquete>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION.
+        // El comentario anterior afirmaba lo contrario sin medirlo. Medido en el g42 (API 31, camino
+        // del permiso de firma) con la CM720, REQ-050 S1: ATTACHED/DETACHED y el resultado del
+        // diálogo llegan; el `am broadcast` del shell sale con "Permission Denial ... requires
+        // <paquete>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" y el receiver no lo ve.
+        ContextCompat.registerReceiver(context, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        Log.i(TAG, "BroadcastReceiver registered RECEIVER_NOT_EXPORTED")
 
         Log.i(TAG, "Listening for actions: ATTACHED, DETACHED, $ACTION_USB_PERMISSION")
 
@@ -901,7 +1094,7 @@ internal class UsbAudioManagerImpl(
                 compatibility.isAllowed -> {
                     Log.i(TAG, "Compatible device detected, auto-connect: $autoConnectEnabled")
                     Log.i(TAG, "  selectedDevice before auto-connect: ${_selectedDevice.value?.displayName}")
-                    Log.i(TAG, "  isDeviceReady before auto-connect: ${nativeBridge.isUsbDeviceInitialized()}")
+                    Log.i(TAG, "  isDeviceReady before auto-connect: ${nativePort.isUsbDeviceInitialized()}")
 
                     // Auto-connect if enabled and not already connected.
                     //
@@ -918,7 +1111,7 @@ internal class UsbAudioManagerImpl(
                         Log.i(TAG, "Auto-connecting to ${audioDevice.displayName} (permission already granted)")
                         val result = connectDevice(audioDevice)
                         Log.i(TAG, "Auto-connect result: $result")
-                        Log.i(TAG, "  isDeviceReady after auto-connect: ${nativeBridge.isUsbDeviceInitialized()}")
+                        Log.i(TAG, "  isDeviceReady after auto-connect: ${nativePort.isUsbDeviceInitialized()}")
 
                         result.onSuccess {
                             Log.i(TAG, "Auto-connect successful, emitting CompatibleDeviceDetected")
@@ -939,7 +1132,7 @@ internal class UsbAudioManagerImpl(
                     } else {
                         // Not auto-connecting, emit event immediately
                         Log.w(TAG, "Skipping auto-connect: autoConnectEnabled=$autoConnectEnabled, selectedDevice=${_selectedDevice.value?.displayName}")
-                        Log.w(TAG, "  isDeviceReady (skip path): ${nativeBridge.isUsbDeviceInitialized()}")
+                        Log.w(TAG, "  isDeviceReady (skip path): ${nativePort.isUsbDeviceInitialized()}")
                         _deviceEvents.emit(UsbDeviceEvent.CompatibleDeviceDetected(audioDevice, compatibility))
                     }
                 }
@@ -984,12 +1177,12 @@ internal class UsbAudioManagerImpl(
         Log.d(TAG, "Initialize native USB: fd=$fileDescriptor, path=$usbfsPath")
 
         return try {
-            val success = nativeBridge.initializeUsbDevice(fileDescriptor, usbfsPath)
+            val success = nativePort.initializeUsbDevice(fileDescriptor, usbfsPath)
             if (success) {
                 Log.i(TAG, "Native USB device initialized successfully")
 
                 // Parse descriptors to get full capabilities
-                val capsArray = nativeBridge.parseUsbDescriptors()
+                val capsArray = nativePort.parseUsbDescriptors()
                 if (capsArray != null) {
                     Log.d(TAG, "USB Capabilities parsed: ${capsArray.contentToString()}")
                 }
@@ -1007,9 +1200,9 @@ internal class UsbAudioManagerImpl(
         Log.d(TAG, "Close native USB")
         try {
             // Stop streaming if active
-            if (nativeBridge.isUsbDeviceInitialized()) {
-                nativeBridge.stopUsbStreaming()
-                nativeBridge.closeUsbDevice()
+            if (nativePort.isUsbDeviceInitialized()) {
+                nativePort.stopUsbStreaming()
+                nativePort.closeUsbDevice()
                 Log.i(TAG, "Native USB device closed")
             }
         } catch (e: Exception) {
@@ -1075,22 +1268,34 @@ internal class UsbAudioManagerImpl(
             try {
                 val preference = (_currentStreamPreference ?: StreamPreference())
                     .copy(preferredSampleRate = sampleRate)
-                nativeBridge.setUsbStreamPreference(preference)
-                _selectedAltsetting?.let {
-                    nativeBridge.selectUsbAltsetting(
+                nativePort.setUsbStreamPreference(preference)
+                // REQ-050 S3 (D18): la config activa registra la selección sólo si el nativo la
+                // aceptó; si la rechazó, el arranque usa la elección automática y eso es lo que corre.
+                val appliedAltsetting = _selectedAltsetting?.takeIf {
+                    nativePort.selectUsbAltsetting(
                         it.interfaceNumber,
                         it.alternateSetting,
                         it.formatIndex
                     )
                 }
 
-                val success = nativeBridge.startUsbStreamingWithMode(
+                val status = nativePort.startUsbStreamingWithModeStatus(
                     sampleRate,
                     channels,
                     bitDepth,
                     streamingMode.id
                 )
-                if (success) {
+                if (status == UsbStreamStartStatus.OK) {
+                    // REQ-050 S3 (D18): lo que se pidió, con la selección que se aplicó, para que el
+                    // runner sepa si una fila coincide y pueda restaurar el stream después.
+                    _activeStreamConfig = UsbActiveStreamConfig(
+                        sampleRate = sampleRate,
+                        channels = channels,
+                        bitDepth = bitDepth,
+                        streamingMode = streamingMode,
+                        altsetting = appliedAltsetting,
+                        clockSourceId = _selectedClockSourceId,
+                    )
                     // Acquire wake lock to prevent CPU from sleeping during streaming
                     acquireWakeLock()
 
@@ -1108,14 +1313,45 @@ internal class UsbAudioManagerImpl(
                     Log.i(TAG, "USB streaming started: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit, mode=${streamingMode.displayName}")
                     UsbResult.Success(Unit)
                 } else {
-                    Log.e(TAG, "Failed to start USB streaming")
-                    UsbResult.Failure(UsbAudioError.STREAMING_ERROR, "Failed to start streaming")
+                    val failure = streamStartFailure(status)
+                    Log.e(TAG, "Failed to start USB streaming: ${failure.error} (native status $status)")
+                    failure
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Exception starting USB streaming: ${e.message}", e)
                 UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, e.message)
             }
         }
+    }
+
+    /**
+     * La causa con que el nativo rechazó el arranque, como error tipado (REQ-050 S2, AC-050.3).
+     * Antes todo salía como [UsbAudioError.STREAMING_ERROR]; ahora ése queda sólo para el único
+     * caso en que es la causa verdadera: libusb no arrancó.
+     */
+    private fun streamStartFailure(status: Int): UsbResult.Failure = when (status) {
+        UsbStreamStartStatus.NO_ENGINE -> UsbResult.Failure(
+            UsbAudioError.NO_ENGINE, "The audio engine does not exist",
+        )
+        UsbStreamStartStatus.NO_CALLBACK -> UsbResult.Failure(
+            UsbAudioError.NO_AUDIO_CALLBACK,
+            "The engine callback is not installed on the USB backend: stop the engine and switch it " +
+                "to the LIBUSB backend before streaming",
+        )
+        UsbStreamStartStatus.NOT_INITIALIZED -> UsbResult.Failure(
+            UsbAudioError.NOT_CONNECTED, "The native USB device is not initialized",
+        )
+        UsbStreamStartStatus.NO_BACKEND -> UsbResult.Failure(
+            UsbAudioError.INITIALIZATION_FAILED,
+            "The USB backend is not registered in the engine's backend manager",
+        )
+        UsbStreamStartStatus.INVALID_MODE -> UsbResult.Failure(
+            UsbAudioError.UNSUPPORTED_FORMAT, "Unknown streaming mode",
+        )
+        UsbStreamStartStatus.START_FAILED -> UsbResult.Failure(
+            UsbAudioError.STREAMING_ERROR, "The USB backend failed to start",
+        )
+        else -> UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, "Unknown native start status $status")
     }
 
     /**
@@ -1127,7 +1363,8 @@ internal class UsbAudioManagerImpl(
                 // Stop health checks first
                 stopHealthChecks()
 
-                nativeBridge.stopUsbStreaming()
+                nativePort.stopUsbStreaming()
+                _activeStreamConfig = null
 
                 // Release wake lock
                 releaseWakeLock()
@@ -1167,54 +1404,7 @@ internal class UsbAudioManagerImpl(
             val healthScore = adaptiveStats?.getOrNull(6) ?: 100f
             val bufferAdjustments = adaptiveStats?.getOrNull(8)?.toInt() ?: 0
 
-            statsArray?.let { arr ->
-                // Extended stats array format (19 elements):
-                // [0] packetsSubmitted, [1] packetsCompleted, [2] packetsErrors
-                // [3] underruns, [4] overruns
-                // [5] currentLatencyMs, [6] avgLatencyMs, [7] minLatencyMs, [8] maxLatencyMs
-                // [9] ringBufferLevel, [10] ringBufferFillPct, [11] ringBufferCapacity
-                // [12] bytesTransferred
-                // [13] currentSampleRateHz, [14] driftPpm, [15] feedbackEffectiveFramesPerPacket
-                // [16] feedbackPacketsReceived, [17] feedbackPacketsInvalid, [18] activeClockSourceId
-                if (arr.size >= 13) {
-                    UsbTransferStats(
-                        packetsSubmitted = arr[0].toLong(),
-                        packetsCompleted = arr[1].toLong(),
-                        packetsErrors = arr[2].toLong(),
-                        bytesTransferred = arr[12].toLong(),
-                        underruns = arr[3].toLong(),
-                        overruns = arr[4].toLong(),
-                        currentLatencyMs = arr[5].toDouble(),
-                        avgLatencyMs = arr[6].toDouble(),
-                        minLatencyMs = arr[7].toDouble(),
-                        maxLatencyMs = arr[8].toDouble(),
-                        ringBufferLevel = arr[9].toInt(),
-                        ringBufferFillPct = arr[10],
-                        ringBufferCapacity = arr[11].toInt(),
-                        bufferMs = currentBufferMs,
-                        healthScore = healthScore,
-                        bufferAdjustments = bufferAdjustments,
-                        currentSampleRateHz = arr.getOrElse(13) { 0f },
-                        driftPpm = arr.getOrElse(14) { 0f },
-                        feedbackEffectiveFramesPerPacket = arr.getOrElse(15) { 0f },
-                        feedbackPacketsReceived = arr.getOrElse(16) { 0f }.toLong(),
-                        feedbackPacketsInvalid = arr.getOrElse(17) { 0f }.toLong(),
-                        activeClockSourceId = arr.getOrElse(18) { -1f }.toInt()
-                    )
-                } else {
-                    // Fallback for old format (5 elements)
-                    UsbTransferStats(
-                        packetsCompleted = arr[0].toLong(),
-                        bytesTransferred = arr[1].toLong(),
-                        underruns = arr[2].toLong(),
-                        overruns = arr[3].toLong(),
-                        avgLatencyMs = arr.getOrElse(4) { 0f }.toDouble(),
-                        bufferMs = currentBufferMs,
-                        healthScore = healthScore,
-                        bufferAdjustments = bufferAdjustments
-                    )
-                }
-            }
+            statsArray?.let { arr -> parseUsbTransferStats(arr, currentBufferMs, healthScore, bufferAdjustments) }
         } catch (e: Exception) {
             Log.e(TAG, "Exception getting transfer stats: ${e.message}", e)
             null
@@ -1224,7 +1414,7 @@ internal class UsbAudioManagerImpl(
     /**
      * Check if USB device is ready for streaming.
      */
-    override fun isDeviceReady(): Boolean = nativeBridge.isUsbDeviceInitialized()
+    override fun isDeviceReady(): Boolean = nativePort.isUsbDeviceInitialized()
 
     /**
      * Check if the connected device supports full-duplex.
@@ -1740,3 +1930,102 @@ internal class UsbAudioManagerImpl(
         )
     }
 }
+
+/**
+ * REQ-050 S3 (D18) — la config del stream que corre, tal como se pidió a [UsbAudioManagerImpl.startStreaming],
+ * con la selección manual que se le aplicó. El runner la usa para saber si una fila coincide con el
+ * stream (si no, lo reabre) y para restaurarlo después.
+ *
+ * `bitDepth` es lo PEDIDO: el nativo no lo aplica por sí solo (elige el formato por puntaje). Lo que
+ * fija los bits es [altsetting]; sin selección manual los bits del stream no se conocen.
+ */
+internal data class UsbActiveStreamConfig(
+    val sampleRate: Int,
+    val channels: Int,
+    val bitDepth: Int,
+    val streamingMode: UsbStreamingMode,
+    val altsetting: UsbAltsettingSelection?,
+    val clockSourceId: Int?,
+)
+
+/** Una selección manual de altsetting de playback (los tres índices de `selectAltsetting`). */
+internal data class UsbAltsettingSelection(
+    val interfaceNumber: Int,
+    val alternateSetting: Int,
+    val formatIndex: Int,
+)
+
+/** La selección manual pendiente (altsetting y reloj); null en cada uno = automático. */
+internal data class UsbManualSelection(
+    val altsetting: UsbAltsettingSelection?,
+    val clockSourceId: Int?,
+)
+
+/**
+ * Quien sabe con qué config corre el stream USB y qué selección manual tiene pendiente (REQ-050 S3,
+ * D18). Lo implementa [UsbAudioManagerImpl]; el runner lo necesita para no tocar un stream que no
+ * puede devolver como estaba.
+ */
+internal interface UsbActiveStreamSource {
+    fun activeStreamConfig(): UsbActiveStreamConfig?
+    fun manualSelection(): UsbManualSelection
+}
+
+/**
+ * El array de `nativeGetUsbTransferStats` como [UsbTransferStats].
+ *
+ * Formato extendido (21 valores desde REQ-050 S3, D16):
+ * [0] packetsSubmitted, [1] packetsCompleted, [2] packetsErrors, [3] underruns, [4] overruns,
+ * [5] currentLatencyMs, [6] avgLatencyMs, [7] minLatencyMs, [8] maxLatencyMs,
+ * [9] ringBufferLevel, [10] ringBufferFillPct, [11] ringBufferCapacity, [12] bytesTransferred,
+ * [13] currentSampleRateHz, [14] driftPpm, [15] feedbackEffectiveFramesPerPacket,
+ * [16] feedbackPacketsReceived, [17] feedbackPacketsInvalid, [18] activeClockSourceId,
+ * [19] packetsInFlight (la cola de salida declarada), [20] declaredMaxLatencyMs.
+ * Los nuevos van al final y se leen con `getOrElse`: un `.so` viejo de 19 los deja en 0.
+ */
+internal fun parseUsbTransferStats(
+    arr: FloatArray,
+    bufferMs: Int,
+    healthScore: Float,
+    bufferAdjustments: Int,
+): UsbTransferStats =
+    if (arr.size >= 13) {
+        UsbTransferStats(
+            packetsSubmitted = arr[0].toLong(),
+            packetsCompleted = arr[1].toLong(),
+            packetsErrors = arr[2].toLong(),
+            bytesTransferred = arr[12].toLong(),
+            underruns = arr[3].toLong(),
+            overruns = arr[4].toLong(),
+            currentLatencyMs = arr[5].toDouble(),
+            avgLatencyMs = arr[6].toDouble(),
+            minLatencyMs = arr[7].toDouble(),
+            maxLatencyMs = arr[8].toDouble(),
+            ringBufferLevel = arr[9].toInt(),
+            ringBufferFillPct = arr[10],
+            ringBufferCapacity = arr[11].toInt(),
+            bufferMs = bufferMs,
+            healthScore = healthScore,
+            bufferAdjustments = bufferAdjustments,
+            currentSampleRateHz = arr.getOrElse(13) { 0f },
+            driftPpm = arr.getOrElse(14) { 0f },
+            feedbackEffectiveFramesPerPacket = arr.getOrElse(15) { 0f },
+            feedbackPacketsReceived = arr.getOrElse(16) { 0f }.toLong(),
+            feedbackPacketsInvalid = arr.getOrElse(17) { 0f }.toLong(),
+            activeClockSourceId = arr.getOrElse(18) { -1f }.toInt(),
+            packetsInFlight = arr.getOrElse(19) { 0f }.toLong(),
+            declaredMaxLatencyMs = arr.getOrElse(20) { 0f }.toDouble(),
+        )
+    } else {
+        // Formato viejo (5 valores).
+        UsbTransferStats(
+            packetsCompleted = arr[0].toLong(),
+            bytesTransferred = arr[1].toLong(),
+            underruns = arr[2].toLong(),
+            overruns = arr[3].toLong(),
+            avgLatencyMs = arr.getOrElse(4) { 0f }.toDouble(),
+            bufferMs = bufferMs,
+            healthScore = healthScore,
+            bufferAdjustments = bufferAdjustments,
+        )
+    }

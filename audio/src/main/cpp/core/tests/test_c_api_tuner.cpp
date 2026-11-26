@@ -25,6 +25,7 @@
  * propagacion pase por coincidencia.
  */
 
+#include "tests/support/SnapshotRead.h"
 #include "tests/support/TestWait.h"
 #include "support/CApiFixture.h"
 
@@ -123,10 +124,16 @@ protected:
             // de audio a 44,1 kHz; ceder 0,5 ms deja el ritmo en ~11x tiempo real, que
             // es rapido para el test y sostenible para el drenador.
             //
+            // El piso es 1 ms, no 0,5: en Windows (winpthreads) un `sleep_for` de menos
+            // de 1 ms no cede NADA, y el helper alimentaba a la velocidad del render
+            // (-O0, ~1,2 ms por bloque): MEDIDO, 12/20 fallas aislado, y el primer
+            // snapshot salia en el bloque ~370 en vez del 4-5 (con >= 1 ms: 0/24).
+            // Es el mismo defecto de arriba por otra causa: el ritmo, no el afinador.
+            //
             // WAIT-OK: estimulo — es el RITMO de alimentacion, no una sincronizacion:
             //          imita que la captura llega en tiempo real. Acortarlo devuelve
             //          el defecto.
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         return false;
     }
@@ -358,16 +365,21 @@ uint64_t targetApplications(WmaEngine* e) {
  * vuelta— y el snapshot se quedaba para siempre con el 1,0000 de la cuerda anterior.
  * Forzado: 6 de 10 con esa firma exacta, 4 de 10 `RingPisado`.
  */
+/// MINI-043: el lector de los tests, sobre la C API. Mismo seqlock que
+/// `AnalysisSnapshot::read`, leido por donde lo lee un consumidor.
+struct CApiTunerSnapshot {
+    WmaEngine* e;
+    bool read(float* out) const { return wma_tuner_get_snapshot(e, out); }
+    bool hasData() const { return e->analysisSnapshot && e->analysisSnapshot->hasData(); }
+};
+
+/// MINI-043: antes eran 64 `yield` y, al agotarse, `ADD_FAILURE` + 0. Bajo ASan un
+/// escritor desplanificado a mitad de un publish dura mas que 64 `yield`: el
+/// mismo rojo sin defecto que tumbo el CI de #385. Ahora reintenta con techo de
+/// TIEMPO; sin publicacion sigue siendo 0 (de verdad: no se analizo nada).
 float analysedFramesNow(WmaEngine* e) {
-    std::array<float, WMA_TUNER_SNAPSHOT_VALUES> probe{};
-    for (int attempt = 0; attempt < 64; ++attempt) {
-        if (wma_tuner_get_snapshot(e, probe.data())) return probe[kSnapFramesAnalyzed];
-        if (!e->analysisSnapshot || !e->analysisSnapshot->hasData()) return 0.0f;  // nunca publico
-        std::this_thread::yield();   // el escritor esta a mitad de un publish
-    }
-    ADD_FAILURE() << "64 lecturas del snapshot salieron rotas seguidas: el escritor no termina "
-                     "un publish, y eso no es una carrera, es un defecto";
-    return 0.0f;
+    return static_cast<float>(
+        wma_test::readCoherentValueOr(CApiTunerSnapshot{e}, kSnapFramesAnalyzed, 0.0));
 }
 
 /// Empuja el rate negociado hasta el `InputNode`, por el mismo camino que un

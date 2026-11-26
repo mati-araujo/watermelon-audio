@@ -10,6 +10,7 @@
 #include "PacketLayout.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
+#include "../platform/Platform.h"
 #include "../platform/Logger.h"
 #include <cstring>
 #include <cstdio>
@@ -1457,7 +1458,7 @@ void UsbTransferManager::eventLoopThread() {
 
     // Publish this thread's tid so LibusbBackend can co-register it in the DSP
     // ADPF hint session (best-effort; the DSP thread starts right after us).
-    mEventThreadTid.store(static_cast<int>(syscall(SYS_gettid)),
+    mEventThreadTid.store(static_cast<int>(wma::platform::currentKernelThreadId()),
                           std::memory_order_release);
 
     // Configure this thread as real-time audio I/O. In the low-latency

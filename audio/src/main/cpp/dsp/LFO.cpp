@@ -1,5 +1,4 @@
 #include "LFO.h"
-#include <random>
 
 LFO::LFO(float sampleRate, float initialRate)
     : mSampleRate(sampleRate) {
@@ -32,6 +31,8 @@ void LFO::setWaveform(Waveform waveform) {
 void LFO::reset() {
     mPhase = 0.0f;
     mRandomPhase = 0.0f;
+    mRandomState = kRandomSeed;   // la misma secuencia aleatoria tras cada reset
+
     mRandomValue = randomFloat();
     mRandomSmoothPhase = 0.0f;
     mRandomPrev = randomFloat();
@@ -172,9 +173,12 @@ float LFO::generateRandomSmooth() {
 }
 
 float LFO::randomFloat() {
-    // Thread-local random generator for better performance
-    static thread_local std::mt19937 generator(std::random_device{}());
-    static thread_local std::uniform_real_distribution<float> distribution(-1.0f, 1.0f);
-
-    return distribution(generator);
+    // xorshift32 per instance (REQ-055 S2): deterministic and seedable, no
+    // syscall on the audio thread (std::random_device was one). Uniform in [-1, 1).
+    uint32_t x = mRandomState;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    mRandomState = x;
+    return static_cast<float>(x >> 8) * (2.0f / 16777216.0f) - 1.0f;
 }

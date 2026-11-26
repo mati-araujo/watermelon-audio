@@ -19,6 +19,7 @@
  * la que no puede volverse escamosa, porque no depende de atrapar un instante.
  */
 
+#include "tests/support/SnapshotRead.h"
 #include "tests/support/TestWait.h"
 #include "../AnalysisRing.h"
 #include "../AnalysisSnapshot.h"
@@ -130,11 +131,6 @@ public:
 
     uint64_t readPosition() const { return mRing.readPosition(); }
 
-    double droppedFrames() {
-        float o[kSnapshotValueCount];
-        return mSnap.read(o) ? static_cast<double>(o[kSnapDroppedFrames]) : -1.0;
-    }
-
     bool convergeOnCleanAudio() {
         return wma_test::waitUntil([&] {
             for (int i = 0; i < 4; ++i) {
@@ -151,21 +147,25 @@ public:
         }, std::chrono::seconds(10));
     }
 
+    // 🔴 MINI-043: estos lectores mapeaban un `read()` fallido a -1 (y `analysed`
+    // a 0), y una lectura que cae a mitad de un publish —bajo ASan pasa— hizo
+    // fallar `ASustainedBreakCountsOnce` con `before = -1` en el CI de #385.
+    // Ahora reintentan cediendo el hilo y, si no hay lectura coherente, el test
+    // FALLA diciendo "no se pudo leer" (ver `tests/support/SnapshotRead.h`).
     double discontinuityCount() {
-        float o[kSnapshotValueCount];
-        return mSnap.read(o) ? static_cast<double>(o[kSnapDiscontinuityCount]) : -1.0;
+        return wma_test::readCoherentValue(mSnap, kSnapDiscontinuityCount);
     }
     double liveMark() {
-        float o[kSnapshotValueCount];
-        return mSnap.read(o) ? static_cast<double>(o[kSnapInputDiscontinuity]) : -1.0;
+        return wma_test::readCoherentValue(mSnap, kSnapInputDiscontinuity);
     }
     void waitForOneMoreTick() {
         const double before = analysed();
         wma_test::waitUntil([&] { return analysed() > before; }, std::chrono::seconds(2));
     }
+    /// Monotono: sin publicacion es 0 de verdad. Una lectura ROTA no lo es — con
+    /// el 0 de antes, `waitForOneMoreTick` tomaba `before = 0` y no esperaba nada.
     double analysed() {
-        float o[kSnapshotValueCount];
-        return mSnap.read(o) ? static_cast<double>(o[kSnapFramesAnalyzed]) : 0.0;
+        return wma_test::readCoherentValueOr(mSnap, kSnapFramesAnalyzed, 0.0);
     }
 
 private:

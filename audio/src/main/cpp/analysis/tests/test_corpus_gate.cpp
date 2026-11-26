@@ -103,6 +103,37 @@ constexpr const char* kSubsetNote =
 #endif
 
 // ---------------------------------------------------------------------------
+// El hash del corpus: vectores de FIPS 180-2 (REQ-061 S2)
+// ---------------------------------------------------------------------------
+/**
+ * `corpus::Sha256` reemplazo al binario `shasum` (que no existe en Windows). Un hash mal implementado
+ * lee un corpus INTACTO como corrupto (o uno corrupto como sano): se fija contra los vectores publicados.
+ *
+ * Bug que atrapa: un relleno o una longitud mal (448 bits cae justo en el limite que obliga a un
+ * segundo bloque), una constante o una rotacion mal, o una actualizacion incremental que pierde el
+ * resto de un bloque parcial (el millon de 'a' entra en trozos que no son multiplos de 64).
+ */
+TEST(CorpusGate, Sha256MatchesTheFipsVectors) {
+    const auto hexOf = [](const std::string& text) {
+        corpus::Sha256 h;
+        h.update(reinterpret_cast<const unsigned char*>(text.data()), text.size());
+        return h.hexDigest();
+    };
+    EXPECT_EQ(hexOf(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    EXPECT_EQ(hexOf("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    EXPECT_EQ(hexOf("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+              "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+
+    corpus::Sha256 million;
+    const std::string chunk(1000, 'a');
+    for (int i = 0; i < 1000; ++i) {
+        million.update(reinterpret_cast<const unsigned char*>(chunk.data()), 37);
+        million.update(reinterpret_cast<const unsigned char*>(chunk.data()) + 37, chunk.size() - 37);
+    }
+    EXPECT_EQ(million.hexDigest(), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+}
+
+// ---------------------------------------------------------------------------
 // 10.5 — sin corpus se SALTEA, no se aprueba
 // ---------------------------------------------------------------------------
 TEST(CorpusGate, WithoutTheCorpusTheDecisionIsSkipAndNeverPass) {
@@ -405,7 +436,12 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
      * trae lectura fina (0,92 c)"— y salio. El ataque era la misma clase (el pico de τ mal
      * muestreado por el barrido), no un timbre distinto. La lista queda armada.
      */
-    constexpr std::array<const char*, 0> kKnownNoFineReadingWithCandidates{};
+    /**
+     * REQ-057 (D27): `ukelele_A4` nunca publica cents. Con el ring vacio al aplicar el objetivo el
+     * modo rapido ya no tira el ataque, y el reinicio de tendencia en el glide del ataque deja la
+     * nota (1,49 s, la mas corta del corpus) sin lectura fina.
+     */
+    constexpr std::array<const char*, 1> kKnownNoFineReadingWithCandidates{"ukelele_A4.wav"};
     auto knownNoFineReading = [&](const std::string& name) {
         for (const char* k : kKnownNoFineReadingWithCandidates) if (name == k) return true;
         return false;
@@ -972,27 +1008,20 @@ TEST(CorpusRobustness, TheAttackTrajectoryAndWhatTheGateWouldChange) {
     std::printf("\n");
 
     /**
-     * AC-036.6 / AC-038.5 — EL TRINQUETE DEL CORPUS, sobre lo que PRODUCCION publica (la columna
-     * "hoy" de arriba).
+     * AC-036.6 / AC-038.5 — EL TRINQUETE DEL CORPUS: **SE MUDO** (REQ-057 S1, D27).
      *
-     * 🔴 REQ-038 S2 LO APRETO A LO QUE REQ-036 DEJO MEDIDO. Estaba escrito contra la linea de base
-     * ANTERIOR a REQ-036 —33 convergidas y 0,73 c— cuando ese REQ ya habia entregado **39 y 0,30**:
-     * o sea que el corpus podia perder SEIS lecturas convergidas y duplicar su error con el gate en
-     * verde. Un trinquete que no se aprieta cuando se gana terreno deja de proteger lo ganado, que
-     * es exactamente lo que un trinquete existe para hacer.
+     * Las dos aserciones que estaban aca —`kConvergedAfterReq036 = 39` y `kMaxErrorAfterReq036 =
+     * 0,31`— se midieron con ESTE arnes (`sweepFile`: tandas de 8192 y `skipToNewest()` al aplicar
+     * el objetivo, o sea que la cuerda arranca a 0,37 s), no con el motor: el motor daba 36-39
+     * segun el tamaño de bloque (AC-057.5). Con el motor independiente del bloque (reloj de tick de
+     * 1024 frames, objetivo aplicado con el ring vacio) la linea de base es 37/41 y 0,2997 c.
      *
-     * Y es lo que AC-038.5 pide: arreglar la gruesa no puede pagarse con la fina. S2 no toca
-     * produccion, asi que estos dos numeros tienen que salir IDENTICOS; si no salen, algo mas se
-     * movio y hay que mirarlo.
+     * Viven ahora en `CorpusRobustness.TheRatchetHoldsForEveryBlockSize`
+     * (`test_block_invariance.cpp`), que las afirma para bloques de 16, 256, 1000 y 8192. Lo que
+     * sigue imprime las mismas cifras (`convergidas_hoy`, `max_error_hoy_milicents`) para que el
+     * diff entre los dos arneses se vea, pero NO las afirma. No volver a poner un piso aca: este
+     * arnes mide otra cosa.
      */
-    constexpr int kConvergedAfterReq036 = 39;
-    constexpr double kMaxErrorAfterReq036 = 0.31;   // medido 0,30; el 0,01 es la resolucion impresa
-    EXPECT_GE(convergedToday, kConvergedAfterReq036)
-        << "bajaron las convergidas del corpus: " << convergedToday << " de " << published
-        << " (REQ-036 dejo " << kConvergedAfterReq036 << ")";
-    EXPECT_LT(maxToday, kMaxErrorAfterReq036)
-        << "subio el error maximo de las convergidas: " << maxToday << " c (REQ-036 dejo 0,30)";
-
     EXPECT_EQ(mismatches, 0) << "la historia de fases reconstruida no reproduce la ventana de produccion";
     EXPECT_LT(worstFidelity, 1e-6) << "el simulador no reproduce la lectura de produccion sin compuerta";
     EXPECT_EQ(over01 + (convergedToday - over01), convergedToday) << "la contabilidad no cierra";

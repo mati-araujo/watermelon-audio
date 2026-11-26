@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "LFO.h"
 #include <cmath>
+#include <algorithm>
+#include <vector>
 
 TEST(LFO, SineOutputRange) {
     LFO lfo;
@@ -73,4 +75,43 @@ TEST(LFO, ResetResetsPhase) {
 
     // After reset, sine should start near 0
     EXPECT_NEAR(afterReset, 0.0f, 0.02f);
+}
+
+// REQ-055 S2 — las formas aleatorias se pueden REPRODUCIR. Hasta S2 salian de un
+// `thread_local std::mt19937` sembrado con `std::random_device`: dos LFOs iguales
+// sorteaban distinto y un render offline con un LFO RANDOM no se podia repetir.
+namespace {
+std::vector<float> randomRun(LFO& lfo, LFO::Waveform w, int n) {
+    lfo.setSampleRate(48000.0f);
+    lfo.setRate(7.0f);
+    lfo.setWaveform(w);
+    std::vector<float> out(static_cast<size_t>(n));
+    for (auto& v : out) v = lfo.process();
+    return out;
+}
+}  // namespace
+
+TEST(LFO, RandomWaveformsAreReproducibleAcrossInstancesAndAfterReset) {
+    for (auto w : {LFO::Waveform::RANDOM, LFO::Waveform::RANDOM_SMOOTH}) {
+        LFO a, b;
+        const auto ra = randomRun(a, w, 48000);
+        const auto rb = randomRun(b, w, 48000);
+        EXPECT_EQ(ra, rb) << "dos LFOs recien construidos sortean distinto";
+
+        // Y no es una constante: el sorteo se mueve (si no, el test no ve nada).
+        float lo = 1.0f, hi = -1.0f;
+        for (float v : ra) { lo = std::min(lo, v); hi = std::max(hi, v); }
+        EXPECT_GT(hi - lo, 0.5f) << "la forma aleatoria no se mueve";
+
+        a.reset();
+        b.reset();
+        LFO fresh;
+        fresh.reset();
+        EXPECT_EQ(randomRun(a, w, 48000), randomRun(fresh, w, 48000))
+            << "reset() no vuelve a la secuencia del principio";
+        for (float v : ra) {
+            ASSERT_GE(v, -1.0f);
+            ASSERT_LE(v, 1.0f);
+        }
+    }
 }

@@ -89,6 +89,24 @@ void expectDryNull(Effect& fx, int mixParam, float dryValue) {
 
 TEST(DistortionAmpSmoke, DistortionEffectStable)  { DistortionEffect fx;  smokeEffect(fx); }
 TEST(DistortionAmpSmoke, AmpSimulatorStable)      { AmpSimulator fx;      smokeEffect(fx); }
+// MINI-057: wma_set_automation_param no filtra valores no finitos y llega hasta setParam.
+// static_cast<int>(NaN) es indefinido (INT_MIN en x86): el tipo de tone stack tiene que
+// quedar donde estaba y los cortes del filtro tienen que seguir siendo reales.
+TEST(DistortionAmpSmoke, AmpSimulatorIgnoresNonFiniteParams) {
+    const float nonFinite[] = {std::nanf(""), INFINITY, -INFINITY};
+    for (const float bad : nonFinite) {
+        AmpSimulator fx;
+        fx.setParam(AmpSimulator::TONESTACK, 2.0f);  // VOX
+        fx.setParam(AmpSimulator::GAIN, 70.0f);
+        fx.setParam(AmpSimulator::TONESTACK, bad);
+        fx.setParam(AmpSimulator::GAIN, bad);
+        fx.setParam(AmpSimulator::BASS, bad);
+        EXPECT_EQ(fx.getParam(AmpSimulator::TONESTACK), 2.0f);
+        EXPECT_EQ(fx.getParam(AmpSimulator::GAIN), 70.0f);
+        EXPECT_EQ(fx.getParam(AmpSimulator::BASS), 50.0f);
+        smokeEffect(fx);
+    }
+}
 TEST(DistortionAmpSmoke, CabinetSimulatorStable)  { CabinetSimulator fx;  smokeEffect(fx); }
 TEST(DistortionAmpSmoke, DecimatorEffectStable)   { DecimatorEffect fx;   smokeEffect(fx); }
 TEST(DistortionAmpSmoke, DeciHpfEffectStable)     { DeciHpfEffect fx;     smokeEffect(fx); }

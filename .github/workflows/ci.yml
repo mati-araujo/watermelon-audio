@@ -70,6 +70,18 @@ concurrency:
   group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
+# El GITHUB_TOKEN de este workflow sólo LEE (REQ-047 S4, 4.13, del security-auditor).
+# Sin este bloque dependia del default del repo. Ningun job escribe: el cache de
+# actions/cache y de setup-gradle no usa este token. check-dep-pins.py exige que todo
+# workflow declare `permissions:` y que ci.yml no pida escritura.
+permissions:
+  contents: read
+
+# Las actions van fijadas por SHA COMPLETO, con el tag en comentario (REQ-047 S4):
+# un tag se puede mover, un SHA no. Cada SHA se verifico contra su tag con
+# `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (desreferenciando el tag
+# anotado), y `scripts/check-dep-pins.py` falla si una action aparece sin SHA o
+# con dos SHA distintos. Dependabot las actualiza de a grupo, SHA y comentario.
 jobs:
   # ¿El cambio toca algo que se compile? Es el reemplazo de `paths-ignore`, y la
   # diferencia que importa es que ESTE JOB SÍ CORRE SIEMPRE: los cinco de abajo se
@@ -85,7 +97,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -135,17 +147,28 @@ jobs:
   # build + ctest pass driven by scripts/run-cpp-tests.sh.
   cpp-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # peor medido: 13.4 min
+    timeout-minutes: 30  # peor medido: 8.0 min (run 43206186559, 5 intentos, 2026-11-12; en modo PR, detector con traza: en push a master corre --full y ese camino no se midio)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # WA-0.4 — pure grep, no toolchain. Runs here rather than in the `ios`
       # job on purpose: macOS minutes cost 10x, and a forbidden include is just
       # as red when Linux says so.
+      - name: Portability guardrail — self-test (WA-0.4)
+        run: bash scripts/check-cpp-portability.sh --self-test
+
       - name: Portability guardrail (WA-0.4)
         run: bash scripts/check-cpp-portability.sh
+
+      # REQ-061 AC-061.1 — lo que no corre en Windows se declara (python3 y nada mas). El --self-test primero,
+      # misma razon que los de abajo. El diff de registro (nm) lo corre windows-cross; los resultados, el .ps1.
+      - name: Lo que no corre en Windows esta declarado — self-test
+        run: python3 scripts/check-windows-not-run.py --self-test
+
+      - name: Lo que no corre en Windows esta declarado
+        run: python3 scripts/check-windows-not-run.py
 
       # WD-1.1 — mismo criterio que el de portabilidad: python3 y nada mas, y
       # una violacion de RT-safety es igual de roja dicha por Linux. El
@@ -217,8 +240,18 @@ jobs:
       # 0/10— porque un `sleep_for(120ms)` es tiempo ABSOLUTO y ahogar la maquina
       # no achica esa ventana. Lo que reproduce es COLAPSARLA: 10/10 en 2 segundos.
       # ---------------------------------------------------------------------
+      # MINI-057. En el PR re-corre SOLO los tests que la corrida de arriba trazo
+      # (`$BUILD/wait-trace/`, que deja el mismo run-cpp-tests.sh de este job, sobre
+      # el mismo arbol); sin traza valida corre todo y lo dice. En `push: master`
+      # corre la suite ENTERA: la traza es el atajo del PR, no la red (invariante
+      # D4 en el encabezado del script).
       - name: Ningun test depende del reloj de pared — REQ-002
-        run: bash scripts/check-time-dependence.sh
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            bash scripts/check-time-dependence.sh --full
+          else
+            bash scripts/check-time-dependence.sh
+          fi
 
       - name: Toda espera cruda en un test esta clasificada — self-test
         run: python3 scripts/check-test-waits.py --self-test
@@ -274,6 +307,16 @@ jobs:
       - name: La configuracion pre-init llega — REQ-045
         run: python3 scripts/check-jni-preinit.py
 
+      # MINI-042 (D8) — cada JNIEXPORT entra al LibusbBackend por su accesor: start/stop/
+      # select bajo mOpMutex, lo corto bajo mMutex. Un start() bajo el lock de estado congela
+      # a Main y ningun test de host lo ve (el arnes JNI usa un backend vacio). Source-only;
+      # --self-test primero.
+      - name: Acceso al backend USB desde la JNI — self-test
+        run: python3 scripts/check-jni-usb-access.py --self-test
+
+      - name: Acceso al backend USB desde la JNI — MINI-042
+        run: python3 scripts/check-jni-usb-access.py
+
       # REQ-021 — los conteos de CLAUDE.md, re-medidos del arbol. Quedaron stale
       # SIETE tandas seguidas mientras la regla vivia solo en prosa. El
       # --self-test primero, misma razon que los de arriba: si el parser se
@@ -284,16 +327,31 @@ jobs:
       - name: Los conteos de CLAUDE.md coinciden con el arbol — REQ-021
         run: python3 scripts/check-doc-counts.py
 
+      # REQ-047 S4 — un lugar por pin (googletest, NDK/CMake del SDK, java-version,
+      # Xcode, SHA de cada action). Va aca, en el job que nunca se saltea por
+      # atestacion: es source-only. El --self-test primero, misma razon que arriba.
+      - name: Un lugar por pin — self-test
+        run: python3 scripts/check-dep-pins.py --self-test
+
+      - name: Un lugar por pin — REQ-047
+        run: python3 scripts/check-dep-pins.py
+
+      # REQ-047 S4 (4.10) — el diff del artefacto publicado contra el registro
+      # (AC-047.2) tiene que poder fallar. Solo el self-test: el diff real necesita
+      # un publish y la credencial del registro.
+      - name: El diff del artefacto publicado puede fallar — self-test
+        run: python3 scripts/diff-published-artifact.py --self-test
+
   # Same suite under AddressSanitizer + UndefinedBehaviorSanitizer. Catches
   # heap/stack overflows, use-after-free and UB in the lock-free rings and the
   # teardown path — the highest-risk code as the driver plan gains new logic.
   cpp-tests-asan:
     runs-on: ubuntu-latest
-    timeout-minutes: 25  # peor medido: 6.6 min
+    timeout-minutes: 25  # peor medido: 16.5 min (run 43206186559, 5 intentos, 2026-11-12)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Instala SOLO lo que falte. La imagen de ubuntu-latest ya trae varias de
       # estas herramientas, y `apt-get update` es la linea mas fragil de todo el
       # CI: si no hace falta, no se corre.
@@ -332,11 +390,11 @@ jobs:
   # handoff are the #1 candidates for latent data races.
   cpp-tests-tsan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # peor medido: 10.6 min
+    timeout-minutes: 30  # peor medido: 26.6 min (run 43206186559, 5 intentos, 2026-11-12); la base con la misma configuracion (TSan -O0 en los dos lados) llego a 1738 s = 29.0 min (run 43023912835, sobre d581137) y el MINI suma ~40 s de build; el peor del MINI sigue siendo 26.6 min
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Instala SOLO lo que falte. La imagen de ubuntu-latest ya trae varias de
       # estas herramientas, y `apt-get update` es la linea mas fragil de todo el
       # CI: si no hace falta, no se corre.
@@ -404,11 +462,11 @@ jobs:
   # ubuntu, y un include prohibido es igual de rojo dicho por Linux.
   cpp-tests-macos:
     runs-on: macos-latest
-    timeout-minutes: 20  # peor medido: 4.3 min
+    timeout-minutes: 20  # peor medido: 9.7 min (base a -O0, run 43023912835; el MINI a -O1 fue 7.7 min, 462 s, pero macOS vuelve a -O0, MINI-057 D23)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
       # pasos de abajo se saltean y este job termina en verde en segundos.
@@ -419,9 +477,16 @@ jobs:
         name: Verificar la atestación local
         run: bash scripts/verify-attestation.sh cpp-tests-macos
 
+      # REQ-047 S4 — el Xcode lo fija .github/toolchain-pins.json, no el default de
+      # la imagen, y el log dice cual se uso. Falla si la imagen no lo trae o si el
+      # seleccionado no es el del pin (build incluido). Ver scripts/ci-select-xcode.sh.
+      - name: Fijar Xcode (toolchain-pins.json)
+        if: steps.attest.outputs.valid != 'true'
+        run: bash scripts/ci-select-xcode.sh
+
       # La imagen normalmente trae los dos; se instala solo lo que falte, para que
       # un cambio de imagen no rompa el job y una corrida normal cueste ~0s.
-      # Necesita un cmake de sistema: el "cmake;3.22.1" del SDK de Android no esta
+      # Necesita un cmake de sistema: el "cmake;<version>" del SDK de Android (catalogo) no esta
       # en PATH y es para AGP.
       - name: Install C++ build tools
         if: steps.attest.outputs.valid != 'true'
@@ -461,7 +526,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
       # pasos de abajo se saltean y este job termina en verde en segundos.
@@ -471,6 +536,13 @@ jobs:
       - id: attest
         name: Verificar la atestación local
         run: bash scripts/verify-attestation.sh ios
+
+      # REQ-047 S4 — el Xcode lo fija .github/toolchain-pins.json, no el default de
+      # la imagen, y el log dice cual se uso. Falla si la imagen no lo trae o si el
+      # seleccionado no es el del pin (build incluido). Ver scripts/ci-select-xcode.sh.
+      - name: Fijar Xcode (toolchain-pins.json)
+        if: steps.attest.outputs.valid != 'true'
+        run: bash scripts/ci-select-xcode.sh
 
       # El boot del simulador tarda ~3m30s y NO depende de nada de lo que sigue,
       # asi que se dispara primero y se espera recien al final (paso "Wait for
@@ -491,7 +563,7 @@ jobs:
       # Sigue haciendo falta para build-ios.sh, que es el primer paso pesado del
       # job ahora que la suite se mudo. La imagen normalmente trae los dos; se
       # instala solo lo que falte. Necesita un cmake de sistema: el
-      # "cmake;3.22.1" del SDK de Android no esta en PATH y es para AGP.
+      # "cmake;<version>" del SDK de Android (catalogo) no esta en PATH y es para AGP.
       - name: Install C++ build tools
         if: steps.attest.outputs.valid != 'true'
         run: |
@@ -523,7 +595,7 @@ jobs:
 
       - name: Set up JDK 17
         if: steps.attest.outputs.valid != 'true'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: 17
@@ -533,7 +605,7 @@ jobs:
       # project at all — without it Gradle fails before reaching any iOS task.
       - name: Set up Android SDK
         if: steps.attest.outputs.valid != 'true'
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         # Solo `platform-tools`: el default de la action es `tools platform-tools`, y el
         # paquete obsoleto `tools` DESAPARECIO del repositorio de Google el 2026-09-14
         # (entre las 20:16 y las 20:43 UTC: verde en el PR de release 2.17.3, rojo en el
@@ -549,15 +621,24 @@ jobs:
       - name: Install NDK and CMake
         if: steps.attest.outputs.valid != 'true'
         run: |
+          # Las versiones salen del catalogo (REQ-047 S3): una sola fuente para el
+          # build (build-logic) y para lo que se instala aca.
+          PKGS="$(python3 scripts/android-sdk-packages.py)"
+          echo "Paquetes del catalogo:" $PKGS
           yes | sdkmanager --licenses > /dev/null 2>&1
-          sdkmanager --install \
-            "ndk;28.2.13676358" \
-            "cmake;3.22.1"
+          sdkmanager --install $PKGS
+          # Cada paquete pedido, con SU version, tiene que figurar instalado. La
+          # imagen del runner trae otros NDK: un grep generico no probaria nada.
+          INSTALLED="$(sdkmanager --list_installed)"
+          for p in $PKGS; do
+            printf '%s\n' "$INSTALLED" | grep -F " $p " \
+              || { echo "::error::$p no figura instalado"; exit 1; }
+          done
 
       # The Kotlin/Native toolchain is a ~1 GB download per run otherwise.
       - name: Cache Kotlin/Native toolchain
         if: steps.attest.outputs.valid != 'true'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.konan
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
@@ -565,7 +646,7 @@ jobs:
 
       - name: Set up Gradle
         if: steps.attest.outputs.valid != 'true'
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       # Since WA-3.1 these also run cinterop, which re-invokes build-ios.sh through
       # the buildIosNativeLib task. That is not wasted work: the CMake tree from the
@@ -671,7 +752,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
       # pasos de abajo se saltean y este job termina en verde en segundos.
@@ -684,14 +765,14 @@ jobs:
 
       - name: Set up JDK 17
         if: steps.attest.outputs.valid != 'true'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: 17
 
       - name: Set up Android SDK
         if: steps.attest.outputs.valid != 'true'
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         # Solo `platform-tools`: el default de la action es `tools platform-tools`, y el
         # paquete obsoleto `tools` DESAPARECIO del repositorio de Google el 2026-09-14
         # (entre las 20:16 y las 20:43 UTC: verde en el PR de release 2.17.3, rojo en el
@@ -704,14 +785,23 @@ jobs:
       - name: Install NDK and CMake
         if: steps.attest.outputs.valid != 'true'
         run: |
+          # Las versiones salen del catalogo (REQ-047 S3): una sola fuente para el
+          # build (build-logic) y para lo que se instala aca.
+          PKGS="$(python3 scripts/android-sdk-packages.py)"
+          echo "Paquetes del catalogo:" $PKGS
           yes | sdkmanager --licenses > /dev/null 2>&1
-          sdkmanager --install \
-            "ndk;28.2.13676358" \
-            "cmake;3.22.1"
+          sdkmanager --install $PKGS
+          # Cada paquete pedido, con SU version, tiene que figurar instalado. La
+          # imagen del runner trae otros NDK: un grep generico no probaria nada.
+          INSTALLED="$(sdkmanager --list_installed)"
+          for p in $PKGS; do
+            printf '%s\n' "$INSTALLED" | grep -F " $p " \
+              || { echo "::error::$p no figura instalado"; exit 1; }
+          done
 
       - name: Set up Gradle
         if: steps.attest.outputs.valid != 'true'
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       # WA-5.5 — la UI del harness no puede entrar al artefacto publicado.
       # Corre aca y no en el job de macOS porque solo necesita que Gradle
@@ -759,6 +849,14 @@ jobs:
         if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:testDebugUnitTest
 
+      # REQ-055 S1 — el target JVM es lo unico que prueba que jvmSharedMain (el
+      # bridge compartido) no toca `android.*`: el compile de Android lo ve con
+      # android.jar en el classpath. Sin esto, la primera compilacion de desktop
+      # seria la del publish.
+      - name: Compile desktop (JVM) — REQ-055 S1
+        if: steps.attest.outputs.valid != 'true'
+        run: ./gradlew :audio:compileKotlinDesktop
+
       - name: Build debug
         if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:assembleDebug
@@ -793,3 +891,17 @@ jobs:
       - name: JNI symbols — declaradas vs exportadas
         if: steps.attest.outputs.valid != 'true'
         run: python3 scripts/check-jni-symbols.py
+
+      # MINI-036 — el .so que se publica compila con -O3, FP seguras sin
+      # -ffinite-math-only, vectorizacion, LTO y -g, y la copia sin strip
+      # conserva .symtab y .debug_* (con el readelf del NDK). Lee
+      # el build.ninja que produjo el .so empaquetado (no el CMakeLists: leerlo
+      # decia "Release" y AGP construia RelWithDebInfo). Necesita el build de
+      # `Build release`, igual que JNI symbols. El self-test primero.
+      - name: Flags del release nativo — self-test
+        if: steps.attest.outputs.valid != 'true'
+        run: python3 scripts/check-release-flags.py --self-test
+
+      - name: Flags del release nativo — MINI-036
+        if: steps.attest.outputs.valid != 'true'
+        run: python3 scripts/check-release-flags.py

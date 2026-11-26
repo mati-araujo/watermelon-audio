@@ -32,11 +32,10 @@ CABINET        | 0,94 dB | la IR del gabinete es una tabla de N muestras; a 96 k
 
 # NO estan aca, y por que:
 #
-#   RANDOM_RESO — no es medible, no es deuda. Sortea un LFO `RANDOM_SMOOTH` y
-#   `LFO::randomFloat()` siembra con `std::random_device`, asi que dos instancias
-#   recien construidas ya difieren. Medido: dispersa 28,9 dB entre corridas al
-#   MISMO rate, contra los 0,5 dB que este barrido tolera. El instrumento no
-#   puede resolver lo que se le pediria afirmar, y por 32 veces.
+#   RANDOM_RESO — ya no esta excluido (REQ-055 S2). Sorteaba un LFO
+#   `RANDOM_SMOOTH` sembrado con `std::random_device` (dispersaba 28,9 dB entre
+#   corridas al MISMO rate); desde S2 el LFO se siembra por instancia y el efecto
+#   entra al barrido y lo pasa, sin entrada en este baseline.
 #
 #   EL CRITERIO DE EXCLUSION, ESCRITO PARA QUE NO SE VUELVA A APLICAR MAL:
 #   un efecto queda fuera cuando su dispersion corrida-a-corrida es comparable a

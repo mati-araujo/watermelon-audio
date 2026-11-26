@@ -23,7 +23,12 @@ out/
 **/cpp/tests/.bench-build
 .kotlin/
 # Configuracion y tooling agentico: es local de la maquina, no del proyecto.
-.claude/
+# Excepcion (MINI-044, decidido por el humano): las skills del dominio de ESTE repo
+# (medir-dsp) se versionan. Salen de ~/.claude/skills para no pesar en las sesiones de
+# otros repos, y un .claude/skills ignorado viviria solo en el checkout principal,
+# invisible para los worktrees de etapa.
+.claude/*
+!.claude/skills/
 # Host sanitizer build dir (run-cpp-tests.sh SANITIZE=...)
 **/cpp/tests/build-san
 __pycache__/

@@ -30,7 +30,7 @@ jobs:
     # nadie consume es la clase de superficie que este repo ya saco otras veces.
     # Si algun dia se encadena algo, vuelven junto con su consumidor.
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           config-file: release-please-config.json

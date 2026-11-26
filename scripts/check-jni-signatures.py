@@ -45,10 +45,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 JNI_DIR = REPO / "audio/src/main/cpp/jni"
-BRIDGE_KT = REPO / (
-    "audio/src/androidMain/kotlin/com/watermellonstudios/audio"
-    "/internal/bridge/AudioNativeBridge.kt"
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jni_bridge_source import BRIDGE_KT_REL  # noqa: E402 — el source set, en un solo lugar
+
+BRIDGE_KT = REPO / BRIDGE_KT_REL
 CLASS_PREFIX = "Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_"
 
 # El equivalente JNI de cada tipo de Kotlin. Cualquier otro tipo —un listener, una

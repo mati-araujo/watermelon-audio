@@ -70,7 +70,9 @@ enum SnapshotValue : int {
     /// Rate al que se CAPTURO, no al que salga la senal. Va en el snapshot para
     /// que nadie pueda asumir 48000 en silencio: el motor lo tuvo hardcodeado.
     kSnapCaptureSampleRate = 0,
-    /// Nivel RMS de lo analizado en este tick, lineal.
+    /// Nivel RMS de lo analizado en este tick, lineal. REQ-057 (D31): el tick son 1024 frames
+    /// de audio (`AnalysisThread::kTickFrames`), y el snapshot se publica una vez por tick;
+    /// antes, una vez por drenado (hasta 2048 frames segun lo que hubiera en el ring).
     kSnapLevelRms          = 1,
     /// Frames que el analisis proceso desde el arranque. Es un float a
     /// proposito —el array es de floats— y a 48 kHz aguanta ~48 dias antes de
@@ -120,9 +122,13 @@ enum SnapshotValue : int {
      * Es la mitad que le da sentido a la ausencia: sin esto el consumidor ve
      * desaparecer la aguja y no tiene con que explicar por que ni hasta donde.
      *
-     * **En cents y no en Hz** porque la ventana del estimador es fija en Hz, asi
-     * que su rango en cents cambia por registro —±119 en E2 contra ±23 en A4— y
-     * cents es la unidad en la que se dibuja un medidor. Publicar Hz obligaria a
+     * **En cents y no en Hz** porque el paso de las rejillas del estimador (1024
+     * frames) es fijo en Hz, asi que su rango en cents cambia por registro —±395 en E2
+     * contra ±81 en A4 a 48 kHz— y cents es la unidad en la que se dibuja un medidor.
+     *
+     * REQ-057 (D22/D28): es `1200·log2(1 + κ·fs/(2·1024·f0))` con κ = 0,9, no la
+     * ventana de 4096 de antes (±119 contra ±23). Cifras de la tabla de D-C, recomputadas
+     * por `InterleavedGrids.TheUsableRangeIsTheDenseFormulaWithKappaNineTenths`. Publicar Hz obligaria a
      * cada consumidor a rehacer la conversion contra el objetivo y el rate.
      *
      * **NaN si no hay objetivo**, no 0: cero es un rango PLAUSIBLE —nulo— y se

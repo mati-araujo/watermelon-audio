@@ -1,5 +1,6 @@
 #include "AmpSimulator.h"
 #include <algorithm>
+#include <cmath>
 #include "../platform/Logger.h"
 
 #define LOG_TAG "AmpSimulator"
@@ -192,7 +193,8 @@ void AmpSimulator::updateFilterCoefficients() {
         return (value - 50.0f) * 0.24f;  // 50 -> 0dB, 0 -> -12dB, 100 -> +12dB
     };
 
-    float bassFreq, midFreq, trebleFreq;
+    // Valores del MARSHALL (el default de mToneStack): un enum fuera de rango no deja el switch sin escribir.
+    float bassFreq = 200.0f, midFreq = 1000.0f, trebleFreq = 3500.0f;
     getToneStackFrequencies(stackType, bassFreq, midFreq, trebleFreq);
 
     // Calculate filter coefficients
@@ -203,6 +205,11 @@ void AmpSimulator::updateFilterCoefficients() {
 }
 
 void AmpSimulator::getToneStackFrequencies(ToneStackType type, float& bassFreq, float& midFreq, float& trebleFreq) {
+    // Valores de MARSHALL, el default del efecto: ninguna salida queda sin asignar. Sin
+    // `default:` en el switch, -Wswitch sigue avisando de un ToneStackType nuevo.
+    bassFreq = 200.0f;
+    midFreq = 1000.0f;
+    trebleFreq = 3500.0f;
     switch (type) {
         case ToneStackType::FENDER:
             bassFreq = 150.0f;
@@ -210,9 +217,6 @@ void AmpSimulator::getToneStackFrequencies(ToneStackType type, float& bassFreq, 
             trebleFreq = 2500.0f;
             break;
         case ToneStackType::MARSHALL:
-            bassFreq = 200.0f;
-            midFreq = 1000.0f;
-            trebleFreq = 3500.0f;
             break;
         case ToneStackType::VOX:
             bassFreq = 180.0f;
@@ -296,6 +300,9 @@ void AmpSimulator::reset() {
 }
 
 void AmpSimulator::setParam(int paramId, float value) {
+    // wma_set_automation_param no filtra no finitos. std::clamp(NaN) devuelve NaN, que
+    // envenenaria cualquier parametro float y, en los enteros, static_cast<int>(NaN) es UB.
+    if (!std::isfinite(value)) return;
     switch (paramId) {
         case GAIN:
             mGain.store(std::clamp(value, 0.0f, 100.0f), std::memory_order_relaxed);

@@ -11,6 +11,7 @@
 // race detection — the test body is written to be TSan-clean.
 // ============================================================================
 #include "support/FixturePath.h"
+#include "tests/support/TestWait.h"
 
 #include <gtest/gtest.h>
 #include "AudioLooper.h"
@@ -78,6 +79,14 @@ TEST(LooperStress, PlaybackVsControlNoCrash) {
     // UI thread: random buffer-mutating + lock-free control ops. All the
     // buffer-freeing ops honour the render-idle contract, so playback must never
     // read freed memory.
+    // Premisa: el stress solo vale si el render ya corre. Bajo carga el hilo puede
+    // tardar en arrancar; se espera a que ocurra el primer callback (el techo solo
+    // decide cuando fallar con mensaje propio, no sincroniza).
+    if (!wma_test::waitUntil([&] { return callbacks.load(std::memory_order_relaxed) > 0; },
+                             std::chrono::milliseconds(10000))) {
+        ADD_FAILURE() << "el hilo de render no llego a ningun callback en 10 s";
+    }
+
     std::mt19937 rng(20260703);
     auto frand = [&](float lo, float hi) {
         return lo + (hi - lo) * (static_cast<float>(rng() & 0xFFFF) / 65535.0f);

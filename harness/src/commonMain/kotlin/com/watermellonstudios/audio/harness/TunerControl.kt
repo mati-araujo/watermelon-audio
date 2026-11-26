@@ -26,7 +26,11 @@ import com.watermellonstudios.audio.api.TunerFactory
 import com.watermellonstudios.audio.api.TunerReading
 import com.watermellonstudios.audio.domain.tuning.Tuning
 import com.watermellonstudios.audio.domain.tuning.TuningConfiguration
+import com.watermellonstudios.audio.harness.smoke.PANEL_TUNING
+import com.watermellonstudios.audio.harness.smoke.SmokeSink
+import com.watermellonstudios.audio.harness.smoke.TUNER_POLL_MS
 import kotlinx.coroutines.delay
+import kotlin.time.TimeSource
 
 /**
  * Control 9 — el afinador. **Y, sobre todo, el control de AC-010.1.**
@@ -72,13 +76,25 @@ import kotlinx.coroutines.delay
  * Si el motor mide **bien**. `isConverged` sale de `snapshot.state`, y REQ-009 de este repo
  * dejó medido que el motor publica `CONVERGIDO` con 1,75 cents de error. Este control muestra
  * lo que el motor dice; que lo que dice sea cierto es otro requisito.
+ *
+ * ## Lo que comparte con el smoke (REQ-053 S4)
+ *
+ * La configuración ([PANEL_TUNING]), el período de lectura ([TUNER_POLL_MS]) y el mapeo a los tres
+ * estados ([TunerReadout]) viven en `smoke/`: el plan `afinador` reproduce ESTE panel (D17) y emite
+ * por tick el mismo estado que este texto. Compartirlos es lo que hace que la reproducción sea la
+ * del panel y no una copia que se desvía. El panel no cambia de comportamiento: sin cuerda por
+ * defecto (D17, AC-053.14: primero se reproduce, después se arregla).
+ *
+ * @param readSink si no es `null`, recibe una línea [tunerReadLine] por lectura (MINI-053): logcat
+ *   con el tag [TUNER_READ_TAG] en Android, stdout en iOS. Se emite en el mismo tick de UI que ya
+ *   lee; no agrega lecturas ni trabajo al hilo de audio o de análisis.
  */
 @Composable
-fun TunerControl(modifier: Modifier = Modifier) {
+fun TunerControl(modifier: Modifier = Modifier, readSink: SmokeSink? = null) {
     // La configuración es obligatoria: no hay default honesto para "contra qué afinar".
     // Ver el KDoc de TunerFactory.
     val tuner: ITuner = remember {
-        TunerFactory.create(TuningConfiguration(Tuning.GUITAR_STANDARD))
+        TunerFactory.create(PANEL_TUNING)
     }
 
     // El afinador toma el device de captura. Se suelta con la pantalla, igual que el nodo
@@ -96,10 +112,12 @@ fun TunerControl(modifier: Modifier = Modifier) {
     // parado gasta cruces para leer lo mismo.
     LaunchedEffect(running) {
         if (!running) return@LaunchedEffect
+        val loopStart = TimeSource.Monotonic.markNow()
         while (true) {
             reading = tuner.reading()
+            readSink?.emit(tunerReadLine(loopStart.elapsedNow().inWholeMilliseconds, reading))
             running = tuner.isRunning
-            delay(POLL_MS)
+            delay(TUNER_POLL_MS)
         }
     }
 
@@ -111,16 +129,8 @@ fun TunerControl(modifier: Modifier = Modifier) {
             Text("Afinador", style = MaterialTheme.typography.titleMedium)
 
             Text(
-                text = when (val r = reading) {
-                    // Tres estados y no dos. Ver el KDoc.
-                    null -> if (running) "sin lectura (el motor no publicó nada)" else "detenido"
-                    else -> when (val cents = r.cents) {
-                        null -> "midiendo · sin enganche"
-                        else -> "${cents.oneDecimal()} cents" +
-                            (r.target?.let { " · objetivo ${it.note.name}" } ?: " · sin objetivo") +
-                            (if (r.isConverged) " · convergido" else "")
-                    }
-                },
+                // Tres estados y no dos. Ver el KDoc y `tunerStatusText`.
+                text = tunerStatusText(reading, running, hasSelectedString = selected != null),
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -222,5 +232,3 @@ fun TunerControl(modifier: Modifier = Modifier) {
         }
     }
 }
-
-private const val POLL_MS = 80L

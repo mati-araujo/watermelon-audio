@@ -20,11 +20,11 @@
 #include <vector>
 
 #if defined(__ANDROID__) || defined(__linux__)
-#include <sys/mman.h>
 #include <unistd.h>
 #endif
 
 #include "../platform/Logger.h"
+#include "../platform/PosixSystemOps.h"
 
 #define MEMORY_LOG_TAG "MemoryUtils"
 #define MEMORY_LOGI(...) wma::logMessage(wma::LogLevel::INFO, MEMORY_LOG_TAG, __VA_ARGS__)
@@ -54,12 +54,12 @@ public:
         }
 
 #if defined(__ANDROID__) || defined(__linux__)
-        int result = mlock(address, size);
-        if (result != 0) {
+        int err = 0;
+        if (!wma::platform::sysLockPages(address, size, err)) {
             // mlock often fails on Android due to RLIMIT_MEMLOCK
             // This is expected and not critical
             MEMORY_LOGW("mlock failed for %zu bytes (errno=%d) - this is expected on Android",
-                        size, errno);
+                        size, err);
             return false;
         }
 
@@ -85,8 +85,7 @@ public:
         }
 
 #if defined(__ANDROID__) || defined(__linux__)
-        int result = munlock(address, size);
-        if (result != 0) {
+        if (!wma::platform::sysUnlockPages(address, size)) {
             MEMORY_LOGW("munlock failed for %zu bytes", size);
             return false;
         }
@@ -173,7 +172,7 @@ public:
      */
     static size_t getPageSize() {
 #if defined(__ANDROID__) || defined(__linux__)
-        static size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        static size_t pageSize = wma::platform::sysPageSize();
         return pageSize;
 #else
         return 4096; // Default assumption
@@ -202,14 +201,12 @@ public:
         size_t alignedSize = size + (addr - alignedAddr);
 
         // Tell kernel we'll need this memory soon
-        int result = madvise(reinterpret_cast<void*>(alignedAddr), alignedSize, MADV_WILLNEED);
-        if (result != 0) {
+        if (!wma::platform::sysAdviseWillNeed(reinterpret_cast<void*>(alignedAddr), alignedSize)) {
             MEMORY_LOGW("madvise(WILLNEED) failed");
         }
 
         // Tell kernel this is sequential access (helps prefetching)
-        result = madvise(reinterpret_cast<void*>(alignedAddr), alignedSize, MADV_SEQUENTIAL);
-        if (result != 0) {
+        if (!wma::platform::sysAdviseSequential(reinterpret_cast<void*>(alignedAddr), alignedSize)) {
             MEMORY_LOGW("madvise(SEQUENTIAL) failed");
         }
 #else

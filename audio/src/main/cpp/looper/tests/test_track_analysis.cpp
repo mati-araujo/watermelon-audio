@@ -704,7 +704,7 @@ TEST(TrackAnalysisCost, ThirtySecondsAtTenMillisecondHopIsPrinted) {
 #ifdef NDEBUG
                 "NDEBUG",
 #else
-                "-O0/Debug",
+                "Debug (asserts vivos)",
 #endif
                 points, voiced, pitchMs, pitchMs / (kSeconds * 1000.0), nb, envMs,
                 envMs / (kSeconds * 1000.0));

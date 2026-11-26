@@ -242,13 +242,23 @@ struct usbdk_device_priv {
 
 struct winusb_device_priv {
 	bool initialized;
+#if defined(LIBUSB_WINDOWS_HOTPLUG)
+	bool seen_during_scan; // set true for each device encountered during windows_get_device_list
+	bool seen_before_scan; // set true for each device encountered before windows_get_device_list
+#endif
 	bool root_hub;
 	uint8_t active_config;
+	uint16_t langid; // cached USB language ID for string descriptor requests
 	uint8_t depth; // distance to HCD
 	const struct windows_usb_api_backend *apib;
 	char *dev_id;
 	char *path;  // device interface path
 	int sub_api; // for WinUSB-like APIs
+	usbi_mutex_t interface_lock; // protects usb_interface[] against concurrent
+	                             // claim/release/altsetting from different handles,
+	                             // and concurrent enumeration setup
+	                             // (set_composite_interface, set_hid_interface,
+	                             // and HUB_PASS/DEV_PASS in winusb_get_device_list)
 	struct {
 		char *path; // each interface needs a device interface path,
 		const struct windows_usb_api_backend *apib; // an API backend (multiple drivers support),
@@ -275,7 +285,7 @@ struct usbdk_device_handle_priv {
 	// Not currently used
 	char dummy;
 };
- 
+
 enum WINUSB_ZLP {
 	WINUSB_ZLP_UNSET = 0,
 	WINUSB_ZLP_OFF = 1,

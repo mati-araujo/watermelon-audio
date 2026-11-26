@@ -143,6 +143,32 @@ class KmpNativeConventionPlugin : Plugin<Project> {
                     publishLibraryVariants("release")
                 }
 
+                // REQ-055 S1 (ADR-0009 de NoisyPad) — el target JVM de NoisyPad Studio.
+                //
+                // `AudioNativeBridge` vive en `jvmSharedMain`, el padre de androidMain y de
+                // desktopMain: el MISMO bridge, con el MISMO FQN, porque los nombres de los
+                // símbolos JNI (`Java_com_watermellonstudios_audio_internal_bridge_
+                // AudioNativeBridge_*`) salen de él. Ahí no entra nada de `android.*`: lo que
+                // depende de Android (logcat, MediaCodec) se inyecta por expect/actual.
+                //
+                // Se declara con la plantilla de jerarquía y NO con `dependsOn` a mano: un
+                // `dependsOn` explícito apaga la plantilla por defecto, y con ella iosMain.
+                jvm("desktop") {
+                    compilerOptions {
+                        jvmTarget.set(JvmTarget.JVM_11)
+                    }
+                }
+
+                @OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
+                applyDefaultHierarchyTemplate {
+                    common {
+                        group("jvmShared") {
+                            withAndroidTarget()
+                            withJvm()
+                        }
+                    }
+                }
+
                 // WA-0.2 — targets iOS. WA-3.1 les enchufa el motor C++ via cinterop.
                 //
                 // El .a se construye fuera de Gradle (scripts/build-ios.sh, ver

@@ -179,6 +179,7 @@ static inline struct winusb_device_priv *winusb_device_priv_init(struct libusb_d
 	struct winusb_device_priv *priv = usbi_get_device_priv(dev);
 	int i;
 
+	usbi_mutex_init(&priv->interface_lock);
 	priv->apib = &usb_api_backend[USB_API_UNSUPPORTED];
 	priv->sub_api = SUB_API_NOTSET;
 	for (i = 0; i < USB_MAXINTERFACES; i++) {
@@ -209,6 +210,7 @@ static inline void winusb_device_priv_release(struct libusb_device *dev)
 		free(priv->usb_interface[i].path);
 		free(priv->usb_interface[i].endpoint);
 	}
+	usbi_mutex_destroy(&priv->interface_lock);
 }
 
 // used to match a device driver (including filter drivers) against a supported API
@@ -310,7 +312,7 @@ typedef enum _USB_HUB_NODE {
 #endif
 
 // Most of the structures below need to be packed
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct _USB_HUB_DESCRIPTOR {
 	UCHAR bDescriptorLength;
@@ -404,7 +406,7 @@ typedef struct _USB_NODE_CONNECTION_INFORMATION_EX_V2 {
 	USB_NODE_CONNECTION_INFORMATION_EX_V2_FLAGS Flags;
 } USB_NODE_CONNECTION_INFORMATION_EX_V2, *PUSB_NODE_CONNECTION_INFORMATION_EX_V2;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #if defined(_MSC_VER)
 // Restore original warnings
@@ -446,7 +448,7 @@ typedef struct {
 	ULONG MaximumBytesPerInterval;
 } WINUSB_PIPE_INFORMATION_EX, *PWINUSB_PIPE_INFORMATION_EX;
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct _WINUSB_SETUP_PACKET {
 	UCHAR RequestType;
@@ -456,7 +458,7 @@ typedef struct _WINUSB_SETUP_PACKET {
 	USHORT Length;
 } WINUSB_SETUP_PACKET, *PWINUSB_SETUP_PACKET;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef PVOID WINUSB_INTERFACE_HANDLE, *PWINUSB_INTERFACE_HANDLE;
 typedef PVOID WINUSB_ISOCH_BUFFER_HANDLE, *PWINUSB_ISOCH_BUFFER_HANDLE;
@@ -698,7 +700,7 @@ struct winusb_interface {
 #define HIDP_STATUS_SUCCESS	0x110000
 typedef void * PHIDP_PREPARSED_DATA;
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct _HIDD_ATTIRBUTES {
 	ULONG Size;
@@ -707,7 +709,7 @@ typedef struct _HIDD_ATTIRBUTES {
 	USHORT VersionNumber;
 } HIDD_ATTRIBUTES, *PHIDD_ATTRIBUTES;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef USHORT USAGE;
 typedef struct _HIDP_CAPS {

@@ -18,7 +18,9 @@
  * counter increments so the UI can show that the window rolled.
  */
 
+#include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <deque>
 #include <mutex>
@@ -49,15 +51,18 @@ public:
         if (!mEnabled.load(std::memory_order_relaxed)) return;
 
         char line[300];
-        std::snprintf(line, sizeof(line), "%c/%s: %s", levelChar(level),
-                      tag ? tag : "", msg ? msg : "");
+        // Truncar a 299 bytes es intencional; el retorno acota la copia a lo que snprintf escribio.
+        const int written = std::snprintf(line, sizeof(line), "%c/%s: %s", levelChar(level),
+                                          tag ? tag : "", msg ? msg : "");
+        const std::size_t len =
+            written < 0 ? 0 : std::min(static_cast<std::size_t>(written), sizeof(line) - 1);
 
         std::lock_guard<std::mutex> lock(mMutex);
         if (mLines.size() >= kCapacity) {
             mLines.pop_front();
             mDropped.fetch_add(1, std::memory_order_relaxed);
         }
-        mLines.emplace_back(line);
+        mLines.emplace_back(line, len);
     }
 
     /** Return and remove everything accumulated since the last drain. */

@@ -86,14 +86,14 @@ interface AudioEngine {
      * Stop the audio engine with optional fade-out.
      *
      * @param fadeMs Fade-out duration in milliseconds (default from config)
-     * @return `success` si el motor **aceptó** el stop; `failure` con la causa si no.
+     * @return `success` con el motor nativo **ya en Stopped**; `failure` con la causa si no.
      *
-     * 🔴 **Con `fadeMs > 0` el `success` NO significa "el stream ya está cerrado"** (B9).
-     * `AudioEngine::stopWithFade` arranca el fade y delega la detención a un worker que
-     * corre cuando el fade termina, así que esta función vuelve antes. `success` afirma
-     * exactamente **que el motor aceptó el pedido**; la detención se completa después, de
-     * forma asíncrona. Con `fadeMs = 0` el camino es sincrónico y no hay nada pendiente.
-     * Quien necesite esperar el cierre mira `state.lifecycle`, que el poller sigue.
+     * 🔴 **`success` significa "el motor paró", también con `fadeMs > 0`** (REQ-050, D11).
+     * Hasta 2.21.0 significaba "el motor aceptó el pedido" y la detención llegaba un fade
+     * + ~60 ms después. Ahora esto vuelve después del fade, con `state.lifecycle` en
+     * `STOPPED`. Si el motor no para dentro de `fadeMs` + 4 s, devuelve
+     * `failure(NativeBridgeException.Timeout)` y **no** publica `STOPPED`: el poller sigue al
+     * motor. Un segundo `stop` durante el fade no reinicia la rampa.
      */
     suspend fun stop(fadeMs: Int? = null): Result<Unit>
 
@@ -305,7 +305,24 @@ interface AudioEngine {
     /**
      * Set dual touch mix mode.
      *
-     * @param mode Mix mode (0=SUM, 1=AVERAGE, etc.)
+     * Cada dedo es una voz con su propia envolvente: ataque de ~5 ms al apoyar y, al levantar,
+     * un release exponencial de ~80 ms a −60 dB con la última frecuencia y amplitud del dedo.
+     * Si el dedo vuelve durante el release, sube desde donde estaba. Con un solo dedo, la salida
+     * es esa voz a ganancia 1 en todos los modos.
+     *
+     * Modos:
+     * - `0` SUM y `1` AVERAGE (default): **desde 2.22.0 son la misma ley, suma a ganancia 1 por
+     *   voz**. Antes los dos multiplicaban la suma por 0,5, así que una voz bajaba ~6 dB al
+     *   entrar la otra. El pico de la suma lo cuida la protección de salida del motor.
+     *   AVERAGE conserva su nombre por compatibilidad.
+     * - `2` MAX: max(|voz1|, |voz2|) con el signo de la suma.
+     * - `3` CROSSFADE: (1 − d)·voz1 + d·voz2, con d = distancia entre los dedos en [0, 1].
+     * - `4` RING: voz1·voz2·0,5.
+     * - `5` AMPLITUDE_BALANCED: pesos amp_i / (amp1 + amp2).
+     *
+     * Los modos 2–5 conservan su ley con los dos dedos y comparten la envolvente.
+     *
+     * @param mode Mix mode (0=SUM, 1=AVERAGE, 2=MAX, 3=CROSSFADE, 4=RING, 5=AMPLITUDE_BALANCED)
      */
     fun setDualTouchMixMode(mode: Int)
 

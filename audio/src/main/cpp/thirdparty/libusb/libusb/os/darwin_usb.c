@@ -477,6 +477,7 @@ static int ep_to_pipeRef(struct libusb_device_handle *dev_handle, uint8_t ep, ui
 
   usbi_dbg (ctx, "converting ep address 0x%02x to pipeRef and interface", ep);
 
+  usbi_mutex_lock(&dev_handle->lock);
   for (iface = 0 ; iface < USB_MAXINTERFACES ; iface++) {
     cInterface = &priv->interfaces[iface];
 
@@ -492,6 +493,7 @@ static int ep_to_pipeRef(struct libusb_device_handle *dev_handle, uint8_t ep, ui
             *interface_out = cInterface;
 
           usbi_dbg (ctx, "pipe %d on interface %d matches", *pipep, iface);
+          usbi_mutex_unlock(&dev_handle->lock);
           return LIBUSB_SUCCESS;
         }
       }
@@ -500,6 +502,8 @@ static int ep_to_pipeRef(struct libusb_device_handle *dev_handle, uint8_t ep, ui
 
   /* No pipe found with the correct endpoint address */
   usbi_warn (HANDLE_CTX(dev_handle), "no pipeRef found with endpoint address 0x%02x.", ep);
+
+  usbi_mutex_unlock(&dev_handle->lock);
 
   return LIBUSB_ERROR_NOT_FOUND;
 }
@@ -637,9 +641,8 @@ static void darwin_devices_attached (void *ptr, io_iterator_t add_devices) {
       process_new_device (ctx, cached_device, old_session_id);
     }
 
-    if (cached_device->in_reenumerate) {
+    if (atomic_exchange(&cached_device->in_reenumerate, false)) {
       usbi_dbg (NULL, "cached device in reset state. reset complete...");
-      cached_device->in_reenumerate = false;
     }
 
     IOObjectRelease(service);
@@ -675,7 +678,7 @@ static void darwin_devices_detached (void *ptr, io_iterator_t rem_devices) {
     usbi_mutex_lock(&darwin_cached_devices_mutex);
     list_for_each_entry(old_device, &darwin_cached_devices, list, struct darwin_cached_device) {
       if (old_device->session == session) {
-        if (old_device->in_reenumerate) {
+        if (atomic_load(&old_device->in_reenumerate)) {
           /* device is re-enumerating. do not dereference the device at this time. libusb_reset_device()
            * will deref if needed. */
           usbi_dbg (NULL, "detected device detached due to re-enumeration. sessionID: 0x%" PRIx64
@@ -969,6 +972,9 @@ static void darwin_exit (struct libusb_context *ctx) {
 static int darwin_get_device_string(struct libusb_device *dev, 
     enum libusb_device_string_type string_type, char *buffer, int length) {
   
+  if (length <= 0)
+    return LIBUSB_ERROR_INVALID_PARAM;
+
   struct darwin_cached_device *priv = DARWIN_CACHED_DEVICE(dev);
   io_iterator_t deviceIterator;
   io_service_t service;
@@ -1006,13 +1012,14 @@ static int darwin_get_device_string(struct libusb_device *dev,
 
   long cfUsedIndex = 0;
   CFStringGetBytes(cf, CFRangeMake(0, CFStringGetLength(cf)), kCFStringEncodingUTF8, '?', false,
-    (uint8_t *) buffer, length, &cfUsedIndex);
+    (uint8_t *) buffer, length - 1, &cfUsedIndex);
   CFRelease(cf);
 
   if (cfUsedIndex <= 0)
     return LIBUSB_ERROR_NOT_FOUND;
 
-  return (int) cfUsedIndex;
+  buffer[cfUsedIndex] = '\0';
+  return (int) cfUsedIndex + 1;
 }
 
 static int get_configuration_index (struct libusb_device *dev, UInt8 config_value) {
@@ -1027,9 +1034,9 @@ static int get_configuration_index (struct libusb_device *dev, UInt8 config_valu
     return darwin_to_libusb (kresult);
 
   for (i = 0 ; i < numConfig ; i++) {
-    (*priv->device)->GetConfigurationDescriptorPtr (priv->device, i, &desc);
+    kresult = (*priv->device)->GetConfigurationDescriptorPtr (priv->device, i, &desc);
 
-    if (desc->bConfigurationValue == config_value)
+    if (kresult == kIOReturnSuccess && desc->bConfigurationValue == config_value)
       return i;
   }
 
@@ -1374,7 +1381,7 @@ static enum libusb_error darwin_get_cached_device(struct libusb_context *ctx, io
     list_for_each_entry(new_device, &darwin_cached_devices, list, struct darwin_cached_device) {
       usbi_dbg(ctx, "matching sessionID/locationID 0x%" PRIx64 "/0x%" PRIx32 " against cached device with sessionID/locationID 0x%" PRIx64 "/0x%" PRIx32,
                sessionID, locationID, new_device->session, new_device->location);
-      if (new_device->location == locationID && new_device->in_reenumerate) {
+      if (new_device->location == locationID && atomic_load(&new_device->in_reenumerate)) {
         usbi_dbg (ctx, "found cached device with matching location that is being re-enumerated");
         *old_session_id = new_device->session;
         break;
@@ -1538,7 +1545,7 @@ static enum libusb_error process_new_device (struct libusb_context *ctx, struct 
 
   } while (0);
 
-  if (!cached_device->in_reenumerate && 0 == ret) {
+  if (!atomic_load(&cached_device->in_reenumerate) && 0 == ret) {
     usbi_connect_device (dev);
   } else {
     libusb_unref_device (dev);
@@ -1582,6 +1589,10 @@ static int darwin_open (struct libusb_device_handle *dev_handle) {
   IOReturn kresult;
 
   if (0 == dpriv->open_count) {
+    if (!dpriv->device) {
+      usbi_err(HANDLE_CTX(dev_handle), "device interface is NULL, cannot open");
+      return LIBUSB_ERROR_NO_DEVICE;
+    }
     /* try to open the device */
     kresult = (*dpriv->device)->USBDeviceOpenSeize (dpriv->device);
     if (kresult != kIOReturnSuccess) {
@@ -2139,19 +2150,26 @@ static int darwin_reenumerate_device (struct libusb_device_handle *dev_handle, b
 
   struct libusb_context *ctx = HANDLE_CTX (dev_handle);
 
-  if (dpriv->in_reenumerate) {
+  if (!dpriv->device) {
+    usbi_warn(ctx, "darwin_reenumerate_device: device interface is NULL");
+    return LIBUSB_ERROR_NO_DEVICE;
+  }
+
+  if (atomic_exchange(&dpriv->in_reenumerate, true)) {
     /* ack, two (or more) threads are trying to reset the device! abort! */
     return LIBUSB_ERROR_NOT_FOUND;
   }
-
-  dpriv->in_reenumerate = true;
 
   /* store copies of descriptors so they can be compared after the reset */
   memcpy (&descriptor, &dpriv->dev_descriptor, sizeof (descriptor));
   cached_configurations = alloca (sizeof (*cached_configurations) * descriptor.bNumConfigurations);
 
   for (i = 0 ; i < descriptor.bNumConfigurations ; ++i) {
-    (*dpriv->device)->GetConfigurationDescriptorPtr (dpriv->device, i, &cached_configuration);
+    kresult = (*dpriv->device)->GetConfigurationDescriptorPtr (dpriv->device, i, &cached_configuration);
+    if (kresult != kIOReturnSuccess) {
+      atomic_store(&dpriv->in_reenumerate, false);
+      return LIBUSB_ERROR_NOT_FOUND;
+    }
     memcpy (cached_configurations + i, cached_configuration, sizeof (cached_configurations[i]));
   }
 
@@ -2170,14 +2188,14 @@ static int darwin_reenumerate_device (struct libusb_device_handle *dev_handle, b
   kresult = (*dpriv->device)->USBDeviceReEnumerate (dpriv->device, options);
   if (kresult != kIOReturnSuccess) {
     usbi_err (ctx, "USBDeviceReEnumerate: %s", darwin_error_str (kresult));
-    dpriv->in_reenumerate = false;
+    atomic_store(&dpriv->in_reenumerate, false);
     return darwin_to_libusb (kresult);
   }
 
   /* capture mode does not re-enumerate but it does require re-open */
   if (capture) {
     usbi_dbg (ctx, "darwin/reenumerate_device: restoring state...");
-    dpriv->in_reenumerate = false;
+    atomic_store(&dpriv->in_reenumerate, false);
     return darwin_restore_state (dev_handle, active_config, claimed_interfaces);
   }
 
@@ -2186,7 +2204,7 @@ static int darwin_reenumerate_device (struct libusb_device_handle *dev_handle, b
   struct timespec start;
   usbi_get_monotonic_time(&start);
 
-  while (dpriv->in_reenumerate) {
+  while (atomic_load(&dpriv->in_reenumerate)) {
     const struct timespec delay = {.tv_sec = 0, .tv_nsec = 1000};
     nanosleep (&delay, NULL);
 
@@ -2198,7 +2216,7 @@ static int darwin_reenumerate_device (struct libusb_device_handle *dev_handle, b
 
     if (elapsed_us >= DARWIN_REENUMERATE_TIMEOUT_US) {
       usbi_err (ctx, "darwin/reenumerate_device: timeout waiting for reenumerate");
-      dpriv->in_reenumerate = false;
+      atomic_store(&dpriv->in_reenumerate, false);
       return LIBUSB_ERROR_TIMEOUT;
     }
   }
@@ -2213,8 +2231,8 @@ static int darwin_reenumerate_device (struct libusb_device_handle *dev_handle, b
   }
 
   for (i = 0 ; i < descriptor.bNumConfigurations ; ++i) {
-    (void) (*dpriv->device)->GetConfigurationDescriptorPtr (dpriv->device, i, &cached_configuration);
-    if (memcmp (cached_configuration, cached_configurations + i, sizeof (cached_configurations[i])) != 0) {
+    kresult = (*dpriv->device)->GetConfigurationDescriptorPtr (dpriv->device, i, &cached_configuration);
+    if (kresult != kIOReturnSuccess || memcmp (cached_configuration, cached_configurations + i, sizeof (cached_configurations[i])) != 0) {
       usbi_dbg (ctx, "darwin/reenumerate_device: configuration descriptor %d changed", i);
       return LIBUSB_ERROR_NOT_FOUND;
     }

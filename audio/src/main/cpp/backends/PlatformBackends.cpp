@@ -12,6 +12,7 @@
 #if defined(__ANDROID__)
 #include "OboeBackend.h"
 #include "LibusbBackend.h"
+#include "OboeCaptureStream.h"
 #elif defined(__APPLE__)
 #include "CoreAudioBackend.h"
 #endif
@@ -33,6 +34,10 @@ LibusbBackend* asLibusbBackend(IAudioBackend* backend) {
     return static_cast<LibusbBackend*>(backend);
 }
 
+std::unique_ptr<INodeCaptureStream> createNodeCaptureStream(InputNode& node) {
+    return std::make_unique<OboeCaptureStream>(node);
+}
+
 #elif defined(__APPLE__)
 
 std::unique_ptr<IAudioBackend> createSystemAudioBackend() {
@@ -46,6 +51,10 @@ std::unique_ptr<IAudioBackend> createUsbAudioBackend() {
 
 LibusbBackend* asLibusbBackend(IAudioBackend*) {
     return nullptr;
+}
+
+std::unique_ptr<INodeCaptureStream> createNodeCaptureStream(InputNode&) {
+    return nullptr;  // No capture of its own for the node on this platform yet.
 }
 
 #else
@@ -63,6 +72,10 @@ std::unique_ptr<IAudioBackend> createUsbAudioBackend() {
 
 LibusbBackend* asLibusbBackend(IAudioBackend*) {
     return nullptr;
+}
+
+std::unique_ptr<INodeCaptureStream> createNodeCaptureStream(InputNode&) {
+    return nullptr;  // No capture of its own for the node on this platform yet.
 }
 
 #endif  // platform

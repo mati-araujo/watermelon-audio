@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "SongSpaceBus.h"
 
 // Oboe is Android-only. Everywhere else the engine runs exclusively through
 // BackendManager/IAudioBackend — which is the path iOS uses with
@@ -137,6 +138,9 @@ void AudioEngine::OboeAdapterDeleter::operator()(void*) const {}
 } while(0)
 
 AudioEngine::AudioEngine() {
+    // REQ-055 S12: el master dimensiona su estado una vez (48 KB); nunca mas en el RT.
+    mMasterStage.prepareMaster(48000);
+
     // Wire looper event dispatcher into AudioLooper BEFORE starting the
     // dispatcher worker thread, so the first audio callback can already push.
     mAudioLooper.setEventDispatcher(&mLooperEventDispatcher);
@@ -393,6 +397,15 @@ bool AudioEngine::transitionToState(EngineState newState) {
 }
 
 bool AudioEngine::start(int fadeTimeMs) {
+    // REQ-050 S2 (review): un worker de stopWithFade() que quedó vivo después de que
+    // otro camino (un stop() directo) paró el motor dispararía su stop() sobre ESTE
+    // arranque, fade + 50 ms después. Se lo recoge antes de tomar mStateMutex: el
+    // worker toma ese mutex en su stop(), así que joinearlo con él tomado deadlockea.
+    {
+        std::lock_guard<std::mutex> control(mStopFadeMutex);
+        reapStaleStopFadeWorker();
+    }
+
     std::lock_guard<std::mutex> lock(mStateMutex);
 
     // WD-1.2 — esto NO configura el thread de audio, y ahora el comentario lo
@@ -426,7 +439,7 @@ bool AudioEngine::start(int fadeTimeMs) {
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         LOGI("Starting via BackendManager...");
 
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
 
         // Ensure callback is set
         manager.setCallback(this);
@@ -860,6 +873,9 @@ void AudioEngine::stop() {
         mFadeCtrl.cancel();
         mOfflineMode.store(false, std::memory_order_release);
         mOfflineMaxBlockFrames.store(0, std::memory_order_release);
+        // Una instancia que deja de ser offline no conserva RAW: la proxima salida a un device
+        // vuelve por la cadena protegida.
+        mOutputProfile.store(static_cast<int>(OutputProfile::Protected), std::memory_order_release);
         transitionToState(EngineState::Stopped);
         LOGI("Motor offline detenido");
         return;
@@ -882,7 +898,7 @@ void AudioEngine::stop() {
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         LOGI("Stopping via BackendManager...");
 
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
 
         // MINI-033 — el rate se despublica ANTES de soltar el stream, igual que en
         // `setLegacyStream(nullptr)` del camino Oboe: un lector RT no puede ver un rate
@@ -1272,6 +1288,12 @@ void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
     // Sin ninguna pista marcada —el caso por defecto y el que corre hoy para todo
     // el mundo— `mixFxTracks` no toca el buffer y esto cuesta una comparación por
     // pista, sin una sola pasada extra sobre las muestras.
+    //
+    // REQ-055 S11 — el play frame del bloque se toma UNA vez, aca, antes de las dos pasadas del
+    // looper: la cancion programada deriva su fase de el, y las pistas ruteadas a la cadena
+    // (esta pasada) y el resto (`process()`) tienen que ver el mismo frame.
+    const int64_t playFrameAtBlockStart = mTransport.getPlayFrame();
+    mAudioLooper.beginBlock(playFrameAtBlockStart, numFrames);
     mAudioLooper.mixFxTracks(mOutputStage.getTempBuffer(), numFrames);
 
     // Effects
@@ -1284,11 +1306,9 @@ void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
     mPreRollRing.write(output, numFrames);
 
     // ---- TRANSPORT TICK ----
-    // Snapshot Transport's play position BEFORE the tick so we pass the
-    // block-start frame to the looper (not the post-tick frame).
-    const int64_t playFrameAtBlockStart = mTransport.getPlayFrame();
-    // Emits any scheduled metronome clicks for this audio block. RT-safe; runs
-    // before the looper so the click is mixed by AudioLooper::process.
+    // `playFrameAtBlockStart` (arriba) es el frame de inicio del bloque, no el posterior al tick.
+    // Emits any scheduled metronome clicks for this audio block. RT-safe; runs before the looper
+    // so the click is mixed by AudioLooper::process.
     mTransport.tick(numFrames, mAudioLooper);
 
     // ---- FADE (applied to synth + FX only — NOT to loops) ----
@@ -1584,47 +1604,31 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
     );
 
     if (hasValidSource) {
-        const float amp1 = dualTouchState.amp1;
-        const float amp2 = dualTouchState.amp2;
-        const float freq1 = dualTouchState.freq1;
-        const float freq2 = dualTouchState.freq2;
+        // REQ-052 — cada slot es una voz con su envolvente. El plan dice que
+        // slots se procesan en este bloque (apoyados o en release) y con que
+        // frecuencia y amplitud (las retenidas, si el dedo ya se levanto).
+        const DualTouchManager::SlotBlockPlan plan = mDualTouch.planSlotBlock(dualTouchState);
+        float* const mixBuffer = mOutputStage.getTempBuffer();
 
-        const bool touch1Active = amp1 > 0.001f;
-        const bool touch2Active = amp2 > 0.001f;
-
-        if (touch1Active && touch2Active) {
-            if (engine1 && engine2) {
-                engine1->process(mDualTouch.getTouch1Buffer(), numFrames, freq1, amp1);
-                engine2->process(mDualTouch.getTouch2Buffer(), numFrames, freq2, amp2);
-            } else {
-                mOscBank.getPrimaryOscillator(static_cast<int>(cachedOscIndex))->setParameters(freq1, amp1);
-                mOscBank.getPrimaryOscillator(static_cast<int>(cachedOscIndex))->render(mDualTouch.getTouch1Buffer(), numFrames);
-                mOscBank.getSecondaryOscillator(static_cast<int>(cachedOscIndex))->setParameters(freq2, amp2);
-                mOscBank.getSecondaryOscillator(static_cast<int>(cachedOscIndex))->render(mDualTouch.getTouch2Buffer(), numFrames);
-            }
-            mDualTouch.mixSignals(
-                mDualTouch.getTouch1Buffer(),
-                mDualTouch.getTouch2Buffer(),
-                mOutputStage.getTempBuffer(),
-                numFrames,
-                dualTouchState
-            );
-        } else if (touch1Active) {
-            if (engine1) {
-                engine1->process(mOutputStage.getTempBuffer(), numFrames, freq1, amp1);
-            } else {
-                mOscBank.getPrimaryOscillator(static_cast<int>(cachedOscIndex))->setParameters(freq1, amp1);
-                mOscBank.getPrimaryOscillator(static_cast<int>(cachedOscIndex))->render(mOutputStage.getTempBuffer(), numFrames);
-            }
-        } else if (touch2Active) {
-            if (engine2) {
-                engine2->process(mOutputStage.getTempBuffer(), numFrames, freq2, amp2);
-            } else {
-                mOscBank.getSecondaryOscillator(static_cast<int>(cachedOscIndex))->setParameters(freq2, amp2);
-                mOscBank.getSecondaryOscillator(static_cast<int>(cachedOscIndex))->render(mOutputStage.getTempBuffer(), numFrames);
-            }
+        if (plan.render[0] && plan.render[1]) {
+            renderDualSlotSource(0, engine1, cachedOscIndex, mDualTouch.getTouch1Buffer(),
+                                 numFrames, plan.freq[0], plan.amp[0]);
+            renderDualSlotSource(1, engine2, cachedOscIndex, mDualTouch.getTouch2Buffer(),
+                                 numFrames, plan.freq[1], plan.amp[1]);
+            mDualTouch.blendSlotVoices(mDualTouch.getTouch1Buffer(),
+                                       mDualTouch.getTouch2Buffer(),
+                                       mixBuffer, numFrames, dualTouchState);
+        } else if (plan.render[0] || plan.render[1]) {
+            // Una sola voz: directo al buffer de mezcla, con su envolvente en el
+            // lugar. Con el dedo apoyado y la ganancia en 1 cuesta lo mismo que
+            // el camino de un dedo de antes.
+            const int slot = plan.render[0] ? 0 : 1;
+            renderDualSlotSource(slot, slot == 0 ? engine1 : engine2, cachedOscIndex,
+                                 mixBuffer, numFrames, plan.freq[slot], plan.amp[slot]);
+            mDualTouch.shapeSoloSlot(slot, mixBuffer, numFrames);
         } else {
-            simd::clearBuffer(mOutputStage.getTempBuffer(), numFrames * 2);
+            // Ningun dedo y ningun release pendiente: no se procesa ningun engine.
+            simd::clearBuffer(mixBuffer, totalSamples);
         }
 
         // Apply engine crossfade if switching
@@ -1640,8 +1644,28 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
         applyEffectsAndLooper(output, numFrames);
 
     } else {
+        mDualTouch.abandonSlotVoices();
         std::fill_n(output, totalSamples, 0.0f);
     }
+}
+
+void AudioEngine::renderDualSlotSource(int slot, SynthEngine* engine, size_t oscIndex,
+                                       float* dst, int32_t numFrames,
+                                       float freq, float amp) {
+    if (engine) {
+        engine->process(dst, numFrames, freq, amp);
+    } else {
+        AudioSource* osc = (slot == 0)
+            ? mOscBank.getPrimaryOscillator(static_cast<int>(oscIndex))
+            : mOscBank.getSecondaryOscillator(static_cast<int>(oscIndex));
+        if (osc) {
+            osc->setParameters(freq, amp);
+            osc->render(dst, numFrames);
+        } else {
+            simd::clearBuffer(dst, numFrames * 2);
+        }
+    }
+    mDualTouch.countSlotBlock(slot);
 }
 
 void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
@@ -1690,6 +1714,19 @@ void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
 }
 
 void AudioEngine::applyMasterAndProtectOutput(float* output, int32_t numFrames) {
+    // Perfil de salida (REQ-055 S12). PROTECTED es el default y es EXACTAMENTE lo de siempre;
+    // RAW solo vale en un render offline (si el motor salio de offline con RAW pendiente, o nunca
+    // lo estuvo, se trata como PROTECTED: nunca sale float sin proteger a un DAC).
+    int profile = mOutputProfile.load(std::memory_order_acquire);
+    if (profile == static_cast<int>(OutputProfile::Raw) &&
+        !mOfflineMode.load(std::memory_order_acquire)) {
+        profile = static_cast<int>(OutputProfile::Protected);
+    }
+    if (profile != mOutputProfileSeen) {
+        if (profile == static_cast<int>(OutputProfile::Master)) mMasterStage.resetMaster();
+        mOutputProfileSeen = profile;
+    }
+
     // ---- MASTER VOLUME ----
     // The level of everything that leaves: instrument, effects, loops AND the
     // monitored input, which is why this runs here and not inside
@@ -1699,16 +1736,31 @@ void AudioEngine::applyMasterAndProtectOutput(float* output, int32_t numFrames) 
     // Upstream of this, and deliberately: the looper's recording tap. The master
     // is a monitoring level, not part of the take.
     const float masterVol = mMasterVolume.load(std::memory_order_acquire);
-    if (masterVol != 1.0f) {
-        simd::applyStereoGain(output, numFrames, masterVol);
+
+    if (profile == static_cast<int>(OutputProfile::Protected)) {
+        if (masterVol != 1.0f) {
+            simd::applyStereoGain(output, numFrames, masterVol);
+        }
+
+        // ---- OUTPUT PROTECTION ----
+        // Exactly once per block, on the signal that actually leaves. OutputStage's
+        // own contract says every path converges here last; MIX used to break that
+        // by running the chain a second time over a buffer this one had already
+        // metered.
+        mOutputStage.processOutput(output, numFrames);
+        return;
     }
 
-    // ---- OUTPUT PROTECTION ----
-    // Exactly once per block, on the signal that actually leaves. OutputStage's
-    // own contract says every path converges here last; MIX used to break that
-    // by running the chain a second time over a buffer this one had already
-    // metered.
-    mOutputStage.processOutput(output, numFrames);
+    if (profile == static_cast<int>(OutputProfile::Master)) {
+        // El limitador va ANTES del volumen de monitoreo: bajar el volumen no cambia lo que
+        // hace el limitador ni lo que mide el export.
+        mMasterStage.processMaster(output, numFrames);
+        if (masterVol != 1.0f) {
+            simd::applyStereoGain(output, numFrames, masterVol);
+        }
+    }
+    // RAW: nada. Los medidores quedan en la cola de los tres perfiles.
+    mOutputStage.meterFinalOutput(output, numFrames);
 }
 
 // ========== DECOMPOSED processAudioBlock ==========
@@ -1768,6 +1820,7 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         const int cachedEngineType = mEngineDispatcher.detectCrossfadeAndGetType();
 
         // Render per mode
+        bool rendersDual = false;
         if (!oscillatorEnabled && hasInputMonitoring) {
             renderInputFx(outputData, numFrames, inputNode);
 
@@ -1786,7 +1839,12 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         } else {
             renderDualTouch(outputData, numFrames, dualTouchState, cachedEngineType,
                             cachedOscIndex, cachedHasActiveModulator, cachedModIndex);
+            rendersDual = true;
         }
+
+        // REQ-052 — todo bloque que NO paso por renderDualTouch suelta las
+        // envolventes por slot (ver DualTouchManager::abandonSlotVoices).
+        if (!rendersDual) mDualTouch.abandonSlotVoices();
 
         // MIX mode monitoring (post-render)
         handleMixMonitoring(outputData, numFrames, oscillatorEnabled, hasInputMonitoring);
@@ -1865,6 +1923,44 @@ bool AudioEngine::startWithFade(int fadeTimeMs) {
 }
 
 void AudioEngine::stopWithFade(int fadeTimeMs) {
+    std::lock_guard<std::mutex> control(mStopFadeMutex);
+
+    // REQ-050 S2 (D8) — tres casos que antes re-armaban la rampa y no tenían por qué:
+    //
+    //   1. Motor ya parado (o parándose): no hay nada que parar. Antes armaba un fade
+    //      y un worker que, fade + 50 ms después, llamaba a stop() sobre el motor que
+    //      se hubiera arrancado mientras tanto. Un stop serializado detrás de otro
+    //      (D11: la variante suspend espera el Stopped) caía justo acá.
+    //   2. Ya hay una parada con fade en curso y piden otra con fade: no se reinicia.
+    //      Antes: cancel() + startFade(1.0 -> 0.0), o sea el audio volvía a pleno
+    //      volumen y el motor tardaba un fade entero más (MINI-041 #4, medido en el
+    //      g42). La rampa en curso sigue con su pendiente y su deadline.
+    //   3. Ya hay una parada en curso y piden un CORTE (0): se corta ya. No sube el
+    //      volumen; sólo adelanta lo que ya se pidió.
+    //
+    // Antes de mirar el estado se recoge un worker terminado o huérfano: si el anterior
+    // está DENTRO de su stop(), leer "Running" acá y armar una rampa nueva haría saltar
+    // el volumen a 1.0 y dejaría un worker nuevo sobre un motor que está parando.
+    reapStaleStopFadeWorker();
+    const EngineState state = mState.load(std::memory_order_acquire);
+    if (state == EngineState::Stopped || state == EngineState::Stopping) {
+        LOGI("stopWithFade: engine already stopped or stopping, nothing to do");
+        return;
+    }
+    if (mStopFadePending.load(std::memory_order_acquire)) {
+        if (fadeTimeMs > 0) {
+            LOGI("stopWithFade: a fade-out stop is already in progress; not restarting it");
+            return;
+        }
+        if (mStopFadeThread && mStopFadeThread->joinable()) {
+            mStopFadeCancel.store(true, std::memory_order_release);
+            mStopFadeThread->join();
+        }
+        mStopFadePending.store(false, std::memory_order_release);
+        stop();
+        return;
+    }
+
     mFadeCtrl.cancel();
 
     // Fade out, then stop. Previously this was gated on `if (mStream)`, so the
@@ -1879,13 +1975,14 @@ void AudioEngine::stopWithFade(int fadeTimeMs) {
 
         // Delayed stop after the fade completes. Owned (see mStopFadeThread) so
         // the destructor can reclaim it; a detached thread could outlive the
-        // engine and call stop() on freed memory. A prior worker, if any, is
-        // superseded: cancel and join it before starting the next.
+        // engine and call stop() on freed memory. A prior worker (one that already
+        // ran its stop()) is joined before starting the next.
         if (mStopFadeThread && mStopFadeThread->joinable()) {
             mStopFadeCancel.store(true, std::memory_order_release);
             mStopFadeThread->join();
         }
         mStopFadeCancel.store(false, std::memory_order_release);
+        mStopFadePending.store(true, std::memory_order_release);
         mStopFadeThread = std::make_unique<std::thread>([this, fadeTimeMs]() {
             // Chunked sleep so teardown can reclaim the thread promptly instead
             // of blocking for the whole fade.
@@ -1893,15 +1990,35 @@ void AudioEngine::stopWithFade(int fadeTimeMs) {
                                 + std::chrono::milliseconds(fadeTimeMs + 50);
             while (!mStopFadeCancel.load(std::memory_order_acquire)) {
                 if (std::chrono::steady_clock::now() >= deadline) {
+                    // Se baja ANTES de stop(): un stopWithFade() que llegue durante este
+                    // stop() ve el motor en Stopping y no hace nada (caso 1).
+                    mStopFadePending.store(false, std::memory_order_release);
                     stop();  // idempotent
                     return;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            // Cancelled: the engine is tearing down and owns the stop() itself.
+            // Cancelled: whoever cancelled owns the stop() (or the teardown).
         });
     } else {
         stop();
+    }
+}
+
+void AudioEngine::reapStaleStopFadeWorker() {
+    if (!mStopFadeThread || !mStopFadeThread->joinable()) return;
+    if (!mStopFadePending.load(std::memory_order_acquire)) {
+        // Terminado, o dentro de su stop() final (baja el flag justo antes): el join
+        // dura a lo sumo ese stop().
+        mStopFadeThread->join();
+        return;
+    }
+    if (mState.load(std::memory_order_acquire) == EngineState::Stopped) {
+        // Huérfano: su parada ya la hizo otro (un stop() directo). Si se lo deja, para
+        // lo que se arranque después.
+        mStopFadeCancel.store(true, std::memory_order_release);
+        mStopFadeThread->join();
+        mStopFadePending.store(false, std::memory_order_release);
     }
 }
 
@@ -2063,7 +2180,7 @@ bool AudioEngine::queryStreamInfo(int32_t& sampleRate, int32_t& bufferSize, doub
     //
     // Try BackendManager first (works for both USB and Oboe-via-backend paths)
     if (mUseBackendManager.load(std::memory_order_acquire)) {
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
         if (manager.isRunning()) {
             auto info = manager.activeStreamInfo();
             sampleRate = info.sampleRate;
@@ -2114,7 +2231,7 @@ bool AudioEngine::getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize,
     lowLatency = -1;
 
     if (mUseBackendManager.load(std::memory_order_acquire)) {
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
         if (manager.isRunning()) {
             auto info = manager.activeStreamInfo();
             sampleRate = info.sampleRate;
@@ -2208,6 +2325,11 @@ bool AudioEngine::startOffline(int sampleRate, int maxBlockFrames) {
 
     configureComponentsWithSampleRate(sampleRate, maxBlockFrames);
 
+    // REQ-055 S2 — el reseteo EXPLICITO. `configure...` re-prepara, pero preparar no
+    // es resetear: varias piezas conservan su cola o su fase a traves de `prepare()`,
+    // y un segundo render de la misma instancia arrancaba con la cola del primero.
+    resetChainForOfflineRender();
+
     // Fade de largo cero: un render offline tiene que ser determinista desde el
     // primer sample. Una rampa de arranque haria que el bloque 0 no sea
     // comparable con el bloque 0 de la corrida siguiente.
@@ -2222,6 +2344,119 @@ bool AudioEngine::startOffline(int sampleRate, int maxBlockFrames) {
 
     LOGI("startOffline: %d Hz, bloques de hasta %d frames, sin device",
          sampleRate, maxBlockFrames);
+    return true;
+}
+
+watermelon_audio::BackendManager& AudioEngine::ownBackendManager() const {
+    return mBackendManager ? *mBackendManager : watermelon_audio::BackendManager::getInstance();
+}
+
+void AudioEngine::resetChainForOfflineRender() {
+    // Cada linea es un estado que sobrevive a `prepare()` y que un render anterior
+    // (o un toque anterior en esta instancia) deja cargado. Se midio cuales hacen
+    // falta con `OfflineHandle.*ARestartedInstance*` y su mutante (sin esta funcion,
+    // el segundo render diverge): docs/dev/render-offline.md.
+    //
+    // NO se tocan la configuracion (tipo de engine, parametros, preset, cadena de
+    // efectos y sus parametros, volumenes) ni el CONTENIDO del looper: eso es la
+    // entrada del render, no su estado.
+
+    // Colas de reverb/delay, fases de LFO y RNG de cada efecto. En vivo lo despacha
+    // el thread de audio (`requestResetEffectChain`); aca no hay thread de audio.
+    mEffectChain.reset();
+    mResetEffectChainPending.store(false, std::memory_order_release);
+
+    // La cancion programada: voces (smoothers, colas de fundido) y agenda APAGADA, como una
+    // instancia fresca. Los clips son la ENTRADA del render y no se tocan; la agenda se publica
+    // despues del start.
+    mAudioLooper.resetSongForRender();
+
+    // Osciladores y moduladores (fases y LFOs del oscilador clasico).
+    for (int i = 0; i < mOscBank.getOscillatorCount(); ++i) {
+        if (auto* osc = mOscBank.getPrimaryOscillator(i)) osc->resetForRender();
+        if (auto* osc2 = mOscBank.getSecondaryOscillator(i)) osc2->resetForRender();
+    }
+    for (int i = 0; i < mOscBank.getModulatorCount(); ++i) {
+        if (auto* mod = mOscBank.getModulator(i)) mod->reset();
+    }
+
+    // Engines (lineas de retardo, fases, granos, semillas) y voces de SoundFont.
+    mEngineDispatcher.reset();
+    if (mVoiceManager) mVoiceManager->reset();
+    mArpSequencer.resetForRender();
+    mArpSfPrevMidiNote = -1;
+    // La rampa de synth volume es POR BLOQUE (del valor del bloque anterior al
+    // actual): sin esto el primer bloque rampea desde el ultimo volumen del render
+    // anterior, y una instancia nueva desde 1,0. Se arranca EN el volumen pedido:
+    // un export no tiene por que entrar con un fundido, y asi el arranque tampoco
+    // depende del tamaño de bloque (medido: con 1,0 -> 0,7, -26 dB de error entre
+    // bloques de 64 y de 1024).
+    mSynthVolumePrev = mSynthVolume.load(std::memory_order_acquire);
+
+    // Etapa de salida (DC blocker, limitador, dither) y lo que solo se observa.
+    mOutputStage.reset();
+    // El master (linea de retardo, deque, ganancia) de una instancia fresca (REQ-055 S12).
+    mMasterStage.resetMaster();
+    mOutputProfileSeen = mOutputProfile.load(std::memory_order_acquire);
+    mWaveformCapture.clear();
+    mDualTouch.requestEnvelopeRestart();
+}
+
+bool AudioEngine::renderBlockTaps(float* output, float* fx, float* tracks, int trackCount,
+                                  int frames) {
+    if (output == nullptr || fx == nullptr || frames <= 0 || trackCount < 0 ||
+        (trackCount > 0 && tracks == nullptr) || trackCount > AudioLooper::MAX_TRACKS_HW) {
+        return false;
+    }
+    if (!mOfflineMode.load(std::memory_order_acquire) ||
+        frames > mOfflineMaxBlockFrames.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const size_t block = static_cast<size_t>(frames) * 2;
+    std::fill_n(fx, block, 0.0f);
+    if (trackCount > 0) std::fill_n(tracks, block * static_cast<size_t>(trackCount), 0.0f);
+    mAudioLooper.armSongTaps(fx, tracks, trackCount, frames);
+    const bool ok = renderBlock(output, nullptr, frames);
+    mAudioLooper.disarmSongTaps();
+    return ok;
+}
+
+bool AudioEngine::ensureSongBus() {
+    std::lock_guard<std::mutex> lock(mSongBusMutex);
+    if (mSongBus) return true;
+    try {
+        auto bus = std::make_unique<wm::SongSpaceBusImpl>();
+        // publishSongBus lo prepara al rate vigente bajo el lock de setSampleRate.
+        mAudioLooper.publishSongBus(bus.get(), 4096);
+        mSongBus = std::move(bus);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+float AudioEngine::songDelayMaxMs() const {
+    const int rate = std::max(mAudioLooper.getSampleRate(), 1);
+    return static_cast<float>(DelayEffect::kMaxDelaySamples) * 1000.0f / static_cast<float>(rate);
+}
+
+bool AudioEngine::setSongMixTrack(int track, float gain, float pan, float send) {
+    if (!ensureSongBus()) return false;
+    mAudioLooper.setSongMixTrack(track, gain, pan, send);
+    return true;
+}
+
+bool AudioEngine::setSongMixSpace(const wm::SongSpaceParams& params) {
+    if (!ensureSongBus()) return false;
+    mAudioLooper.setSongMixSpace(params);
+    return true;
+}
+
+bool AudioEngine::setOutputProfile(OutputProfile profile) {
+    if (profile == OutputProfile::Raw && !mOfflineMode.load(std::memory_order_acquire)) {
+        return false;
+    }
+    mOutputProfile.store(static_cast<int>(profile), std::memory_order_release);
     return true;
 }
 
@@ -2345,6 +2580,13 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate, int maxBlock
 
     // Configure synth engines (Phase 1E — via SynthEngineDispatcher)
     mEngineDispatcher.prepare(sampleRate, maxBlockSize);
+
+    // REQ-052 — los coeficientes de la envolvente por slot del dual touch salen
+    // del rate; el thread de audio los recalcula al ver el valor nuevo.
+    mDualTouch.setEnvelopeSampleRate(sampleRate);
+    // Un prepare arranca de cero: una envolvente que quedo "apoyada" al parar
+    // el motor no puede sonar como release fantasma en el primer bloque.
+    mDualTouch.requestEnvelopeRestart();
     mEngineDispatcher.updateVoiceEngines(mVoiceManager.get());
     LOGI("SynthEngineDispatcher prepared");
 
@@ -2383,6 +2625,7 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate, int maxBlock
 
     // Configure output stage (DC blocker, limiter, ditherer)
     mOutputStage.prepare(sampleRate, 0);
+    mMasterStage.prepareMaster(sampleRate);
     LOGI("OutputStage configured at %dHz", sampleRate);
 }
 
@@ -2400,7 +2643,7 @@ void AudioEngine::setUseBackendManager(bool enabled) {
 
     if (enabled) {
         // Register this AudioEngine as the callback for BackendManager
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
         manager.setCallback(this);
 
         // MINI-007 — aca habia un tercer `manager.setSampleRate(preferido)`, la
@@ -2529,6 +2772,8 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // y esa pasada SALTEA las pistas marcadas. Sin esta llamada, una pista
         // marcada no la mezclaría nadie y quedaría MUDA con USB INPUT_FX activo
         // — un modo entero donde el flag apagaría la pista en vez de rutearla.
+        const int64_t usbPlayFrameAtBlockStart = mTransport.getPlayFrame();
+        mAudioLooper.beginBlock(usbPlayFrameAtBlockStart, numFrames);
         mAudioLooper.mixFxTracks(mOutputStage.getTempBuffer(), numFrames);
 
         // 3. Process through effect chain (INPUT → EFFECTS → OUTPUT)
@@ -2538,7 +2783,6 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // Without this the USB direct INPUT_FX fast-path bypasses the looper entirely:
         // no recording, no playback of existing tracks, no transport advance.
         mPreRollRing.write(outputData, numFrames);
-        const int64_t usbPlayFrameAtBlockStart = mTransport.getPlayFrame();
         mTransport.tick(numFrames, mAudioLooper);
         mAudioLooper.process(outputData, numFrames, usbPlayFrameAtBlockStart);
 

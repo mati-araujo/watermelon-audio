@@ -5,11 +5,13 @@
  * captura) y 1.5 (el snapshot nunca entrega un estado a medio escribir).
  */
 
+#include "tests/support/SnapshotRead.h"
 #include "tests/support/TestWait.h"
 #include "../AnalysisRing.h"
 #include "../AnalysisSnapshot.h"
 #include "../AnalysisThread.h"
 
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -143,15 +145,20 @@ inline bool waitForRoom(AnalysisRing& ring, int frames,
 class AnalysedFrames {
 public:
     explicit AnalysedFrames(const AnalysisSnapshot& snap) : mSnap(snap) {}
+    /// MINI-043: el reintento vive ahora en `wma_test::readCoherent`, compartido
+    /// con el resto de los lectores. La semantica de COTA INFERIOR no cambia: se
+    /// devuelve la ultima lectura coherente, y 0 si nunca se publico. Lo unico
+    /// que cambia es el caso del escritor TRABADO (64 `yield` antes, un techo de
+    /// tiempo ahora): antes devolvia la cota vieja en silencio, ahora el test
+    /// falla diciendo "no se pudo leer" — un escritor que no termina un publish
+    /// no es una carrera, es un defecto.
     double operator()() {
         float o[kSnapshotValueCount];
-        for (int attempt = 0; attempt < 64; ++attempt) {
-            if (mSnap.read(o)) {
-                mLast = static_cast<double>(o[kSnapFramesAnalyzed]);
-                break;
-            }
-            if (!mSnap.hasData()) break;    // nunca se publico: mLast sigue en 0
-            std::this_thread::yield();      // el escritor esta a mitad de un publish
+        const wma_test::SnapshotRead r = wma_test::readCoherent(mSnap, o);
+        if (r == wma_test::SnapshotRead::kCoherent) {
+            mLast = static_cast<double>(o[kSnapFramesAnalyzed]);
+        } else if (r == wma_test::SnapshotRead::kTimedOut) {
+            ADD_FAILURE() << "no se pudo leer framesAnalyzed: " << wma_test::describe(r);
         }
         return mLast;
     }
@@ -363,20 +370,22 @@ TEST(AnalysisThread, TheCaptureWriterIsNeverBlockedWhileTheThreadChurns) {
         }
     });
 
+    // Cada ciclo deja vivo al thread hasta que el escritor AVANZO: asi cada start/stop
+    // pasa con escrituras concurrentes, por condicion y no por duracion. Antes era un
+    // sleep de 3 ms y un piso de 50 escrituras en total, y el piso dependia del reloj
+    // del SO: en Windows, con el timer en 15,6 ms, sleep_for(200 us) dura 15,6 ms y
+    // el escritor llegaba a 15 (medido, MSYS2 UCRT64 -O0).
     for (int cycle = 0; cycle < 10; ++cycle) {
         th.start(kRate);
-        // ESTIMULO: le da al thread un rato de vida antes de pararlo, que es lo que
-        // ejercita el ciclo start/stop. No sincroniza nada — lo que se afirma
-        // despues son los contadores, no que este sleep haya alcanzado.
-        // WAIT-OK: estimulo — le da vida al thread antes de pararlo; es lo que
-        //          ejercita el ciclo start/stop, no sincroniza una asercion.
-        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        const uint64_t before = writes.load(std::memory_order_relaxed);
+        const bool advanced = wma_test::waitUntil(
+            [&] { return writes.load(std::memory_order_relaxed) >= before + 3; });
+        EXPECT_TRUE(advanced) << "ciclo " << cycle << ": el escritor no avanzo con el thread vivo";
         th.stop();
     }
     stop.store(true, std::memory_order_release);
     writer.join();
 
-    EXPECT_GT(writes.load(), 50u) << "el escritor casi no llego a escribir";
     // Cota deliberadamente FLOJA: lo que separa es "no espera a nadie" de "se
     // queda trabado", no un presupuesto de latencia. Bajo carga alta el
     // planificador solo ya explica varios ms, y afinar esto lo volveria un test
@@ -507,6 +516,137 @@ TEST(AnalysisSnapshotTest, APublishThatLandsMidCopyIsCaughtByTheSequenceCheck) {
     for (int i = 0; i < kSnapshotValueCount; ++i) {
         EXPECT_FLOAT_EQ(got[i], 2.0f) << "valor " << i;
     }
+}
+
+// ---------------------------------------------------------------------------
+// MINI-043 — una lectura rota no se devuelve como un valor (AC-043.1, AC-043.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Envoltorio que CUENTA las lecturas rotas. Existe para que el test pueda soltar
+ * la compuerta recien cuando el lector ya choco contra la ventana impar al menos
+ * una vez — o sea, con el reintento ejercido de verdad, por condicion y sin
+ * sleeps. `readCoherent` es plantilla justamente para poder pasarle esto.
+ */
+namespace {
+struct BrokenReadCounter {
+    const AnalysisSnapshot& snap;
+    mutable std::atomic<int> broken{0};
+    bool read(float* out) const {
+        const bool ok = snap.read(out);
+        if (!ok) broken.fetch_add(1, std::memory_order_relaxed);
+        return ok;
+    }
+    bool hasData() const { return snap.hasData(); }
+};
+}  // namespace
+
+/**
+ * AC-043.3 — EL DEFECTO DE #385, REPRODUCIDO CON LA COMPUERTA.
+ *
+ * El CI lo pago con `DiscontinuityCount.ASustainedBreakCountsOnce` en rojo por
+ * `before = -1`: el helper del banco traducia el `false` de `read()` —el
+ * escritor a mitad de un publish, bajo ASan— a `-1`. Aca la ventana no se busca
+ * por iteraciones: se la fabrica deteniendo al escritor con el contador IMPAR.
+ *
+ * Tres afirmaciones, y cada una atrapa un bug distinto:
+ *  1. el patron VIEJO devuelve -1 en esa ventana. Es la premisa: sin ella, este
+ *     test no reproduce lo que paso en el CI y el resto no prueba nada;
+ *  2. el lector nuevo, con el escritor trabado, FALLA diciendo "no se pudo
+ *     leer" y no deja nada en `out` — atrapa un lector que, al vencer el techo,
+ *     devolviera un valor (el mismo -1, o un 0, o lo que hubiera en el buffer);
+ *  3. el lector nuevo, con el escritor que TERMINA, devuelve el juego nuevo
+ *     entero — atrapa un lector que no reintenta (el mutante "false -> -1").
+ */
+TEST(SnapshotReadMini043, AReadThatLandsMidPublishIsRetriedNotTurnedIntoAValue) {
+    AnalysisSnapshot snap;
+    float a[kSnapshotValueCount];
+    float b[kSnapshotValueCount];
+    for (int i = 0; i < kSnapshotValueCount; ++i) { a[i] = 1.0f; b[i] = 2.0f; }
+    snap.publish(a);
+
+    gSnapshotIsMidPublish.store(false);
+    gSnapshotHoldMidPublish.store(true);
+    std::thread writer([&] { snap.publish(b); });
+    // La compuerta se suelta SIEMPRE, aunque falle un ASSERT: si no, el escritor
+    // queda girando y el join del destructor del thread aborta el binario entero.
+    struct Release {
+        std::thread& w;
+        ~Release() {
+            gSnapshotHoldMidPublish.store(false, std::memory_order_release);
+            if (w.joinable()) w.join();
+        }
+    } release{writer};
+
+    ASSERT_TRUE(waitFor([] { return gSnapshotIsMidPublish.load(); }))
+        << "la compuerta nunca se activo: el test no llego a la ventana";
+
+    // 1 · la premisa: el helper VIEJO de `test_discontinuity_count.cpp`, tal cual.
+    {
+        float o[kSnapshotValueCount];
+        const double old = snap.read(o) ? static_cast<double>(o[kSnapDiscontinuityCount])
+                                        : -1.0;
+        ASSERT_EQ(old, -1.0)
+            << "premisa rota: con el escritor detenido a mitad de un publish, read() "
+               "tendria que dar false — y el patron viejo lo convertia en -1";
+    }
+
+    // 2 · escritor trabado: el lector nuevo falla con su mensaje y no inventa nada.
+    {
+        float t[kSnapshotValueCount];
+        for (int i = 0; i < kSnapshotValueCount; ++i) t[i] = 42.5f;
+        EXPECT_EQ(wma_test::readCoherent(snap, t, std::chrono::milliseconds(50)),
+                  wma_test::SnapshotRead::kTimedOut);
+        for (int i = 0; i < kSnapshotValueCount; ++i) {
+            EXPECT_FLOAT_EQ(t[i], 42.5f) << "dejo algo en el buffer sin lectura coherente ("
+                                         << i << ")";
+        }
+        double v = 0.0;
+        EXPECT_NONFATAL_FAILURE(
+            v = wma_test::readCoherentValue(snap, kSnapDiscontinuityCount,
+                                            std::chrono::milliseconds(50)),
+            "no se pudo leer");
+        EXPECT_TRUE(std::isnan(v)) << "con el techo vencido devolvio " << v
+                                   << ", un valor que el motor no publico";
+    }
+
+    // 3 · el escritor termina mientras el lector reintenta: lectura coherente.
+    BrokenReadCounter counting{snap};
+    double got = -7.0;
+    std::thread reader([&] {
+        got = wma_test::readCoherentValue(counting, kSnapDiscontinuityCount,
+                                          std::chrono::seconds(10));
+    });
+    // Se suelta recien cuando el lector YA vio una lectura rota: asi el
+    // reintento queda ejercido de verdad, y no por suerte del planificador.
+    const bool sawBroken = waitFor([&] { return counting.broken.load() > 0; });
+    gSnapshotHoldMidPublish.store(false, std::memory_order_release);
+    writer.join();
+    reader.join();
+
+    ASSERT_TRUE(sawBroken) << "el lector nunca choco con la ventana: el test no la ejercio";
+    EXPECT_EQ(got, 2.0)
+        << "el lector devolvio " << got << " en vez del juego que el escritor termino de "
+           "publicar: una lectura rota se convirtio en un valor";
+}
+
+/**
+ * AC-043.1 — "nunca se publico" tampoco es un valor, SALVO para un contador.
+ *
+ * `readCoherentValueOr` existe para los contadores monotonos, donde sin
+ * publicacion la respuesta honesta es 0 (no se analizo nada). Para todo lo demas
+ * `readCoherentValue` tiene que fallar: atrapa que alguien "simplifique" las dos
+ * en una sola que devuelva 0 siempre.
+ */
+TEST(SnapshotReadMini043, NeverPublishedIsZeroOnlyWhereTheCallerSaysSo) {
+    AnalysisSnapshot snap;
+    float t[kSnapshotValueCount];
+    EXPECT_EQ(wma_test::readCoherent(snap, t), wma_test::SnapshotRead::kNeverPublished);
+    EXPECT_EQ(wma_test::readCoherentValueOr(snap, kSnapFramesAnalyzed, 0.0), 0.0);
+    double v = 0.0;
+    EXPECT_NONFATAL_FAILURE(v = wma_test::readCoherentValue(snap, kSnapState),
+                            "nunca se publico");
+    EXPECT_TRUE(std::isnan(v));
 }
 
 // ---------------------------------------------------------------------------
@@ -721,19 +861,33 @@ TEST(AnalysisThread, ThePublishedRangePredictsWhereTheFineReadingExists) {
     // inventado, siete veces el real— pasaba los 8 tests. Lo que lo mata es
     // exigir que CERCA DEL BORDE INTERIOR la lectura todavia exista: con 150
     // inventado, a 135 cents no hay ninguna.
+    //
+    // REQ-057 S1 (AC-057.3): ES LA ASERCION «EN LAS DOS DIRECCIONES» — que el rango no se INFLE ni
+    // se ACHIQUE — y por eso el borde se pega al rango: −0,97·range (adentro: tiene que haber
+    // lectura) y −1,03·range (afuera: no tiene que haber). Antes eran −0,90 y −1,5, con un 10 % y
+    // un 50 % de holgura que dejaban pasar un rango inflado hasta ~1,5x o achicado hasta ~0,9x. Con
+    // el rango nuevo (hop 1024, κ = 0,9) a ±3 % hay margen de sobra para el error de la gruesa
+    // (0,21 c) y ninguno para un κ equivocado.
+    //
+    // Mutantes (A4 a 44,1 kHz: rango publicado 74,6 c; sin κ seria 82,7): (i) publicar el rango SIN
+    // κ pero admitir con κ ⇒ el borde interior cae a −0,97·82,7 = −80,2 c, donde el motor ya no mide:
+    // rojo en «adentro»; (ii) admitir con κ = 1 y publicar con κ = 0,9 ⇒ a −1,03·74,6 = −76,9 c el
+    // parcial 1 todavia entra y hay lectura fuera de lo declarado: rojo en «afuera».
     std::array<float, kSnapshotValueCount> nearEdge{};
-    ASSERT_TRUE(runAt(-0.90 * range, nearEdge)) << "LA MUESTRA SALIO CORTA en el borde interior";
+    ASSERT_TRUE(runAt(-0.97 * range, nearEdge)) << "LA MUESTRA SALIO CORTA en el borde interior";
     EXPECT_FALSE(std::isnan(nearEdge[kSnapCents]))
-        << "el rango dice " << range << " y a " << (-0.90 * range)
+        << "el rango dice " << range << " y a " << (-0.97 * range)
         << " cents —adentro— no publico nada: el rango publicado es mas grande "
-           "que el real";
+           "que el real (AC-057.3: el rango no se puede inflar)";
 
-    // 3. FUERA del rango publicado: ausente. Se toma 1,5x para no medir el borde.
+    // 3. FUERA del rango publicado: ausente. A 1,03x —no 1,5x— para que un rango ACHICADO
+    // tampoco pase: si el motor midiera hasta 1,5x lo declarado, el rango seria falso por defecto.
     std::array<float, kSnapshotValueCount> outside{};
-    ASSERT_TRUE(runAt(-1.5 * range, outside)) << "LA MUESTRA SALIO CORTA fuera del rango";
+    ASSERT_TRUE(runAt(-1.03 * range, outside)) << "LA MUESTRA SALIO CORTA fuera del rango";
     EXPECT_TRUE(std::isnan(outside[kSnapCents]))
-        << "el rango dice " << range << " y a " << (-1.5 * range)
-        << " cents igual publico " << outside[kSnapCents];
+        << "el rango dice " << range << " y a " << (-1.03 * range)
+        << " cents igual publico " << outside[kSnapCents]
+        << " (AC-057.3: el rango no se puede achicar; fuera de lo declarado no hay lectura)";
 }
 
 /**
@@ -810,6 +964,15 @@ struct OverrunObservation {
  * SIN esperar lugar. Es lo contrario de `feedAtAnalysisPace`, y reproduce el
  * mecanismo que la spec de REQ-009 declara real.
  */
+#if defined(_WIN32)
+// 8 bloques son exactamente kCapacityFrames: el ring solo se pisa si el analisis NO drena durante la
+// rafaga. En Windows (Debug, hilos de 15,6 ms de quantum) drena y el test no reproduce su premisa ~40 %
+// de las veces; con 16 se pisa siempre. POSIX queda en 8, que es lo que se midio.
+constexpr int kOverrunBlocksPerTick = 16;
+#else
+constexpr int kOverrunBlocksPerTick = 8;
+#endif
+
 OverrunObservation feedOverrunning(AnalysisRing& ring, AnalysisSnapshot& snap,
                                    double f0, int k, int iterations) {
     OverrunObservation obs;
@@ -899,7 +1062,7 @@ TEST(AnalysisThreadReq009, WhatIsPublishedAsConvergedWhileTheRingOverrunsActuall
     th.setTargetHz(kReq009Target);
     th.start(kRate);
 
-    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, kOverrunBlocksPerTick, 150);
     th.stop();
 
     ASSERT_GT(obs.samples, 0)
@@ -944,7 +1107,9 @@ TEST(AnalysisThreadReq009, HealthyContiguousAudioStillConverges) {
         [&](int startFrame) { return stringBlock(kReq009Real, 1024, startFrame); }, 150);
 
     float o[kSnapshotValueCount];
-    ASSERT_TRUE(snap.read(o));
+    const wma_test::SnapshotRead got = wma_test::readCoherent(snap, o);   // MINI-043
+    ASSERT_EQ(got, wma_test::SnapshotRead::kCoherent)
+        << "no se pudo leer el snapshot: " << wma_test::describe(got);
     const int state = static_cast<int>(o[kSnapState]);
     const double dropped = o[kSnapDroppedFrames];
     const double cents = o[kSnapCents];
@@ -983,7 +1148,7 @@ TEST(AnalysisThreadReq009, AGapIsDistinguishableFromNotConvergedYet) {
         AnalysisThread th(ring, snap);
         th.setTargetHz(kReq009Target);
         th.start(kRate);
-        broken = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+        broken = feedOverrunning(ring, snap, kReq009Real, kOverrunBlocksPerTick, 150);
         th.stop();
     }
 
@@ -999,7 +1164,9 @@ TEST(AnalysisThreadReq009, AGapIsDistinguishableFromNotConvergedYet) {
             ring, snap,
             [&](int startFrame) { return stringBlock(kReq009Real, 1024, startFrame); },
             150));
-        ASSERT_TRUE(snap.read(healthy));
+        const wma_test::SnapshotRead got = wma_test::readCoherent(snap, healthy);   // MINI-043
+        ASSERT_EQ(got, wma_test::SnapshotRead::kCoherent)
+            << "no se pudo leer el snapshot: " << wma_test::describe(got);
         th.stop();
     }
 
@@ -1035,7 +1202,7 @@ TEST(AnalysisThreadReq009, TheMarkClearsAndTheReadingConvergesOnceTheInputIsWhol
     th.setTargetHz(kReq009Target);
     th.start(kRate);
 
-    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, kOverrunBlocksPerTick, 150);
     ASSERT_GT(obs.samples, 0) << "el desbordador no desbordo";
     ASSERT_GT(obs.markUpSamples, 0)
         << "la premisa de este test es que la marca llego a estar ARRIBA mientras se "
@@ -1046,7 +1213,9 @@ TEST(AnalysisThreadReq009, TheMarkClearsAndTheReadingConvergesOnceTheInputIsWhol
         << "la muestra de recuperacion salio corta";
 
     float after[kSnapshotValueCount];
-    ASSERT_TRUE(snap.read(after));
+    const wma_test::SnapshotRead got = wma_test::readCoherent(snap, after);   // MINI-043
+    ASSERT_EQ(got, wma_test::SnapshotRead::kCoherent)
+        << "no se pudo leer el snapshot: " << wma_test::describe(got);
     const double dropped = after[kSnapDroppedFrames];
     th.stop();
 
@@ -1120,8 +1289,10 @@ TEST(AnalysisThreadReq009, ABurstOverrunIsNeverPublishedAsConverged) {
     }, std::chrono::seconds(10));
 
     float before[kSnapshotValueCount];
-    ASSERT_TRUE(snap.read(before) &&
-                static_cast<int>(before[kSnapState]) == kStateConverged)
+    const wma_test::SnapshotRead got = wma_test::readCoherent(snap, before);   // MINI-043
+    ASSERT_EQ(got, wma_test::SnapshotRead::kCoherent)
+        << "no se pudo leer el snapshot: " << wma_test::describe(got);
+    ASSERT_TRUE(static_cast<int>(before[kSnapState]) == kStateConverged)
         << "premisa rota: el motor nunca llego a converger con audio limpio, asi que no hay "
            "medicion viva que el hueco pueda contaminar y el EXPECT de abajo seria verde por "
            "vacio.";

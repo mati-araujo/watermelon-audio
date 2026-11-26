@@ -1,3 +1,6 @@
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+
 plugins {
     id("watermelon.kmp.native")
     `maven-publish`
@@ -23,6 +26,93 @@ android {
         }
     }
 }
+
+// MINI-058 — NOTICE viaja con el binario. Las licencias de lo vendorizado (pffft, libusb,
+// TinySoundFont...) piden reproducir su aviso en lo que acompaña a la distribucion binaria:
+// el AAR y el JAR de desktop lo llevan como recurso, en `META-INF/watermelon-audio/NOTICE`.
+// El directorio propio es a proposito: `META-INF/NOTICE` a secas cae en los excludes por
+// defecto de AGP y desaparece SIN error, en el AAR y en el APK del consumidor. El klib de
+// iOS no lleva recursos. Despues de empaquetar, `NoticeInArchive` abre el AAR y el JAR y
+// falla si el aviso no esta: que el build pase no prueba que viaje.
+// La fuente es UNA: el NOTICE de la raiz, copiado al build.
+abstract class NoticeResources : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val notice: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val dir = outputDir.get().dir("META-INF/watermelon-audio").asFile
+        dir.deleteRecursively()
+        dir.mkdirs()
+        notice.get().asFile.copyTo(dir.resolve("NOTICE"), overwrite = true)
+    }
+}
+
+val rootNotice = rootProject.layout.projectDirectory.file("NOTICE")
+
+androidComponents {
+    onVariants { variant ->
+        val task = tasks.register<NoticeResources>("${variant.name}NoticeResources") {
+            notice.set(rootNotice)
+        }
+        val resources = checkNotNull(variant.sources.resources) {
+            "la variante ${variant.name} no tiene recursos Java: NOTICE no viajaria en el AAR"
+        }
+        resources.addGeneratedSourceDirectory(task, NoticeResources::outputDir)
+    }
+}
+
+val desktopNoticeResources = tasks.register<NoticeResources>("desktopNoticeResources") {
+    notice.set(rootNotice)
+    outputDir.set(layout.buildDirectory.dir("generated/notice/desktop"))
+}
+kotlin.sourceSets.named("desktopMain") {
+    resources.srcDir(desktopNoticeResources.flatMap { it.outputDir })
+}
+
+// Abre el archivo empaquetado (el AAR mira dentro de su classes.jar) y exige la entrada.
+abstract class NoticeInArchive : DefaultTask() {
+    @get:InputFiles
+    abstract val archive: ConfigurableFileCollection
+
+    @get:Input
+    abstract val nestedJar: Property<String>
+
+    @TaskAction
+    fun verify() {
+        val entry = "META-INF/watermelon-audio/NOTICE"
+        val file = archive.singleFile
+        ZipFile(file).use { zip ->
+            val found = if (nestedJar.get().isEmpty()) {
+                zip.getEntry(entry) != null
+            } else {
+                val inner = zip.getEntry(nestedJar.get())
+                    ?: throw GradleException("${file.name} no tiene ${nestedJar.get()}")
+                ZipInputStream(zip.getInputStream(inner)).use { jar ->
+                    generateSequence { jar.nextEntry }.any { it.name == entry }
+                }
+            }
+            if (!found) throw GradleException("${file.name} no lleva $entry (MINI-058)")
+        }
+    }
+}
+
+val verifyReleaseAarNotice = tasks.register<NoticeInArchive>("verifyReleaseAarNotice") {
+    archive.from(tasks.named("bundleReleaseAar"))
+    nestedJar.set("classes.jar")
+}
+val verifyDesktopJarNotice = tasks.register<NoticeInArchive>("verifyDesktopJarNotice") {
+    archive.from(tasks.named("desktopJar"))
+    nestedJar.set("")
+}
+// `named { }` filtra por nombre sin realizar las tasks; los `tasks.named(...)` de arriba
+// corren recien al realizar la verificacion, cuando AGP y KMP ya registraron las suyas.
+tasks.named { it == "assembleRelease" }.configureEach { dependsOn(verifyReleaseAarNotice) }
+tasks.named { it == "desktopJar" }.configureEach { finalizedBy(verifyDesktopJarNotice) }
 
 // Host C++ unit tests (dsp + effects + looper + usb googletest suites).
 // Delegates to the platform wrapper, which locates a host toolchain
@@ -130,7 +220,10 @@ val jniHarnessCoverage by tasks.registering {
     }
 }
 
-tasks.withType<Test>().configureEach {
+// Sólo los unit tests de Android (`test<Variante>UnitTest`): son los que corren el arnés.
+// El `desktopTest` del target JVM (REQ-055 S1) es otra cosa: sin este filtro borraba
+// build/jni-coverage en su doFirst y su finalizador fallaba con "no dejó cobertura".
+tasks.withType<Test>().named { it.endsWith("UnitTest") }.configureEach {
     // Hacen falta LAS DOS lineas, y esto NO es ceremonia: lo destapo el control
     // positivo de esta etapa. Con solo `dependsOn` —que unicamente ORDENA— se
     // renombro el simbolo del lado C++, la libreria se reconstruyo SIN el, y
@@ -145,6 +238,19 @@ tasks.withType<Test>().configureEach {
     inputs.files(buildHostJniLib.map { it.outputs.files })
         .withPropertyName("hostJniHarnessLibrary")
         .withPathSensitivity(PathSensitivity.NONE)
+    // Hallazgo 2 de REQ-055: `TunerDiagnosticsOptInTest` lee la FUENTE del puente de iOS, que no es
+    // input de esta task (no compila en la JVM). Sin declararla, quitarle el marcador dejaba el test
+    // UP-TO-DATE y verde sin correr (medido). Misma trampa que la de arriba.
+    // La ruta va UNA vez y viaja al test por propiedad: si se mueve el archivo, el test falla (no
+    // lee otra copia) y el input no queda apuntando a la nada.
+    val optInSources = listOf(
+        file("src/jvmSharedMain/kotlin/com/watermellonstudios/audio/internal/bridge/AudioNativeBridge.kt"),
+        file("src/iosMain/kotlin/com/watermellonstudios/audio/internal/bridge/IosAudioBridge.kt"),
+    )
+    inputs.files(optInSources)
+        .withPropertyName("bridgeSourcesForOptInTest")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    systemProperty("wma.optInBridgeSources", optInSources.joinToString(File.pathSeparator) { it.absolutePath })
     // D4: así es como la librería aparece sin tocar `androidMain`. Se APENDEA al
     // valor que traiga el runtime en vez de reemplazarlo: pisarlo deja a la JVM
     // sin sus propias librerías nativas.

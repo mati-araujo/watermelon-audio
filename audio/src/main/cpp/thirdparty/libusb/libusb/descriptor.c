@@ -148,6 +148,8 @@ static void clear_interface(struct libusb_interface *usb_interface)
 				usb_interface->altsetting + i;
 
 			free((void *)ifp->extra);
+			ifp->extra = NULL;
+			ifp->extra_length = 0;
 			if (ifp->endpoint) {
 				uint8_t j;
 
@@ -156,10 +158,13 @@ static void clear_interface(struct libusb_interface *usb_interface)
 						       ifp->endpoint + j);
 			}
 			free((void *)ifp->endpoint);
+			ifp->endpoint = NULL;
+			ifp->bNumEndpoints = 0;
 		}
 	}
 	free((void *)usb_interface->altsetting);
 	usb_interface->altsetting = NULL;
+	usb_interface->num_altsetting = 0;
 }
 
 static int parse_interface(libusb_context *ctx,
@@ -241,6 +246,10 @@ static int parse_interface(libusb_context *ctx,
 				usbi_warn(ctx,
 					  "short extra intf desc read %d/%u",
 					  size, header->bLength);
+				/* Keep the invariant: bNumEndpoints > 0 implies
+				 * endpoint != NULL. The endpoint array isn't
+				 * allocated yet on this early return. */
+				ifp->bNumEndpoints = 0;
 				return parsed;
 			}
 
@@ -322,7 +331,11 @@ static void clear_configuration(struct libusb_config_descriptor *config)
 					config->interface + i);
 	}
 	free((void *)config->interface);
+	config->interface = NULL;
+	config->bNumInterfaces = 0;
 	free((void *)config->extra);
+	config->extra = NULL;
+	config->extra_length = 0;
 }
 
 static int parse_configuration(struct libusb_context *ctx,
@@ -1367,7 +1380,7 @@ static int parse_iad_array(struct libusb_context *ctx,
 
 	/* First pass: Iterate through desc list, count number of IADs */
 	iad_array->length = 0;
-	while (consumed < size) {
+	while (size - consumed >= DESC_HEADER_LENGTH) {
 		header.bLength = buf[0];
 		header.bDescriptorType = buf[1];
 		if (header.bLength < DESC_HEADER_LENGTH) {
@@ -1375,9 +1388,9 @@ static int parse_iad_array(struct libusb_context *ctx,
 				 header.bLength);
 			return LIBUSB_ERROR_IO;
 		}
-		else if (header.bLength > size) {
+		else if (header.bLength > size - consumed) {
 			usbi_warn(ctx, "short config descriptor read %d/%u",
-					  size, header.bLength);
+					  size - consumed, header.bLength);
 			return LIBUSB_ERROR_IO;
 		}
 		if (header.bDescriptorType == LIBUSB_DT_INTERFACE_ASSOCIATION)
@@ -1660,11 +1673,12 @@ int API_EXPORTED libusb_get_device_string(libusb_device *dev,
 	if ((string_type < 0) || (string_type >= LIBUSB_DEVICE_STRING_COUNT)) {
 		return LIBUSB_ERROR_INVALID_PARAM;
 	}
-	if (length < 0) {
+	if (length <= 0) {
 		return LIBUSB_ERROR_INVALID_PARAM;
 	}
 	if (NULL == data) {
 		length = 0;
+		data = NULL;
 	} else if (length > 0) {
 		*data = 0;  // return an empty string on errors when possible
 	}

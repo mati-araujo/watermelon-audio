@@ -262,6 +262,24 @@ enum libusb_class_code {
 	/** Personal Healthcare */
 	LIBUSB_CLASS_PERSONAL_HEALTHCARE = 0x0f,
 
+	/** Audio & Video */
+	LIBUSB_CLASS_AUDIO_VIDEO = 0x10,
+
+	/** Billboard */
+	LIBUSB_CLASS_BILLBOARD = 0x11,
+
+	/** Interface class */
+	LIBUSB_CLASS_TYPE_C_BRIDGE = 0x12,
+
+	/** Bulk display */
+	LIBUSB_CLASS_BULK_DISPLAY_PROTOCOL = 0x13,
+
+	/** MCTP */
+	LIBUSB_CLASS_MCTP = 0x14,
+
+	/** I3C */
+	LIBUSB_CLASS_I3C = 0x3c,
+
 	/** Diagnostic Device */
 	LIBUSB_CLASS_DIAGNOSTIC_DEVICE = 0xdc,
 
@@ -1663,10 +1681,10 @@ enum libusb_device_string_type {
  * 255 max descriptor length with 2 byte header 
  *  => 253 bytes UTF-16LE, no null termination (USB 2.0 9.6.7)
  *  => 126.5 codepoints
- *  => 126 * 3 + 1
+ *  => 127 * 3 + 1
  *  => 382 bytes
  * 
- * Stay with 256 * 2/3 = 384 to be safe.
+ * Stay with 256 * 3/2 = 384 to be safe.
  */
 #define LIBUSB_DEVICE_STRING_BYTES_MAX  (384U)
  

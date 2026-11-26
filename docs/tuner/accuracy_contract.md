@@ -40,6 +40,8 @@ es la clase de mentira que un usuario con un Peterson al lado descubre en treint
 | **Strobe** | incertidumbre (1σ) a 3 s, peor caso (B0 del bajo) | **0,0017 cents** | — |
 | **Detección gruesa** (S4) | error de identificación, peor caso (C7) | **0,21 cents** | 50 |
 | **Detección gruesa** | claridad mínima sobre el rango A0–C7 | **0,967** | — |
+| **Lectura temprana** (REQ-058) | peor error antes del veredicto, B0/E2/A4 a 0,5 y 1 s | **0,1188 cents** | — |
+| **Lectura temprana** | peor error en σ antes del veredicto (cobertura: ≤ 2) | **0,231 σ** | 2 |
 | **Modo rápido** (S5) | saltos de cuerda durante un barrido desde floja | **0** | 0 |
 | **Modo rápido** | latencia de conmutación de cuerda | **85,3 ms** | 150 |
 | **Intonación** (S9) | error de la diferencia de dos medidas | **< 0,0001 cents** | 0,1 |
@@ -78,35 +80,110 @@ ponderado de los cuatro parciales. En una cuerda real e inarmónica esos parcial
 física —con B = 1e-3 leen 0,865 / 3,455 / 7,756 / 13,740 cents— y el peso 1/σ² era MAYOR en los
 altos, o sea en los más estirados.
 
-**Rango útil de la lectura fina (REQ-003).** El strobe no mide cualquier desajuste: el
-desenvuelto de fase acota la captura a `|Δf| < fs/(2N)`, así que el rango **depende del objetivo
-y del sample rate** y se deriva —no se tabula, porque una tabla queda stale con el primer cambio
-de rate:
+**Y antes del veredicto hay σ también (REQ-058).** Desde v2.26.0 el motor publica `cents` + σ en
+`MEASURING` desde ~0,2 s de cada ataque: la **altura instantánea**, la pendiente de un ajuste
+cuadrático sobre las últimas 5–8 fases de la serie densa, sin extrapolar (R-PITCH-65/67). Su σ es
+max(residuos, propagada) con ≥ 3 parciales y max(propagada, √Σσ²) con 2, sumada en cuadratura con
+un **término de deriva** —la curvatura del ajuste, sin sesgo—, que es lo que la vuelve honesta
+durante el glide del ataque, al que la σ de los residuos es ciega (R-PITCH-52). `CONVERGED` sigue
+saliendo sólo del veredicto de 12 ventanas con la σ de siempre ≤ 0,1, y una lectura temprana puede
+tener σ ≤ 0,1 y ser `MEASURING` (R-PITCH-62). El estado es la señal de convergencia; la σ sola no.
+`CONVERGED` es bit a bit el de antes sólo si el ataque sale del **silencio** (rms < 0,001) o llega
+antes de la primera fase, y no queda pendiente un re-punteo anterior sin asentar: el golden y la primera pulsada del corpus, de pre-roll silencioso. Todo
+ataque sobre señal viva abre un segmento y lo cambia: un **re-punteo** de la misma nota converge
+antes, porque las 12 ventanas se acumulan entre segmentos (0,369 s de mediana, 39 de 41,
+`EarlyReadingCorpus.ARepluckReadsItsOwnSegmentWithin250ms`); una clavija girada o una nota nueva con
+la cuerda sonando dejan el veredicto en espera o lo reinician en el ataque; y un punteo sobre ruido
+de sala (rms ≥ 0,001) descarta en el ataque las fases previas — **sin medir**, ver la tabla del
+final.
 
-    rango_cents(f0) = 1200 · log2(1 + fs / (2·N·f0))          N = 4096
+Honesta se mide por **cobertura**: |error contra el oráculo corto de f0| ≤ 2·√(σ² + σ_or²), con
+σ_or el ruido propio del oráculo, versionado en
+`audio/src/main/cpp/analysis/tests/corpus-v1-sigma-oraculo-f0.tsv`. Sobre `corpus-v1`
+(`EarlyReadingCorpus.MeasuringIsCoveredPerStratumAgainstF0`, que sale SKIPPED sin el corpus):
 
-A 48 kHz eso da ±118,9 cents en E2, ±51,0 en G3, ±30,5 en E4 y ±22,9 en A4: **cuanto más aguda
-la cuerda, más angosto**. Fuera de ese rango el motor publica **ausencia** —NaN— en vez de un
-número, porque la lectura aliasada no sale mal de forma visible: sale mal con σ ≈ 0 y estado
-`CONVERGIDO`. La detección gruesa se sigue publicando, así que el usuario conserva "qué nota es"
-cuando pierde "cuánto exactamente".
+| estrato de las `MEASURING` | cubre | n | piso |
+|---|---|---|---|
+| (0, 0,25] s, ≥ 3 parciales | 0,951 | 789 | 0,95 PROVISIONAL |
+| (0,25, 1] s, 2 parciales | 0,787 | 122 | 0,77 PROVISIONAL |
+| (0,25, 1] s, ≥ 3 parciales | 0,950 | 7423 | 0,94 PROVISIONAL |
+| asentada, 2 parciales | 0,909 | 526 | 0,89 PROVISIONAL |
+| asentada, ≥ 3 parciales | 0,906 | 16924 | 0,89 PROVISIONAL |
 
-Verificado por `StrobeRange.*` sobre las 14 cuerdas del catálogo, en los dos signos.
+Los 24 glides sintéticos de REQ-036 cubren 0,983 a 2σ (`EarlyReading.GlidesAreCoveredAtTwoSigma`).
+El error temprano contra f0 en `corpus-v1`: p90 **1,449 c**, mediana 0,078 c; en los primeros
+250 ms, p90 9,159 c —es el glide, y σ lo cubre— (`EarlyReadingCorpus.EarlyErrorAndSettledSigmaAgainstF0`).
+Y la σ no se infla: sobre una nota estable sintética, σ / error real de 2,84 / 3,36 / 3,40 con
+2 / 3 / 4 parciales, contra un techo de 3,5 PROVISIONAL (`EarlyReading.AStableNoteDoesNotInflateSigma`).
+**Con 1 parcial la σ temprana no cubre**: σ / error de 0,01 y cobertura 0 sobre la misma síntesis.
+Es la σ propagada, que mide precisión y no exactitud, y sin ajuste estirado la lectura es la del
+parcial, no f0. Hueco declarado al final de este documento.
+Los PROVISIONAL esperan al corpus de acero y al del g42; la base es un ataque por archivo y pasada.
+
+**Rango útil de la lectura fina (REQ-003, REQ-057).** El strobe no mide cualquier desajuste: el
+desenvuelto de fase acota la captura de cada parcial a `|Δf| < fs/(2·H)`, donde `H` es el **hop**
+de la serie de fases, no el largo de la ventana. Cada parcial tiene cuatro rejillas intercaladas
+(ventana N = 4096, desfasadas H = 1024 frames): cada una es el estimador de antes, y la serie
+densa que forman entre las cuatro fija la vuelta de 2π del desenvuelto. El rango **depende del
+objetivo y del sample rate** y se deriva —no se tabula, porque una tabla queda stale con el primer
+cambio de rate—:
+
+    rango_cents(n·f0) = 1200 · log2(1 + κ · fs / (2·H·n·f0))      H = 1024, κ = 0,9
+
+Un parcial vota sólo si la detección gruesa cae dentro de SU rango (orden n), y el índice 14 es la
+misma fórmula con n = 1. κ = 0,9 es un margen contra el borde: `fs/(2H)` es el nulo del lóbulo
+principal de Hann, y cerca de ahí un parcial lee mal (medición del checkpoint de diseño de
+REQ-057 S1, en su etapa). Con la fórmula, a 44,1 / 48 kHz: E2 ±365,7 / ±394,6 c, G3 ±163,2 /
+±177,0, E4 ±98,9 / ±107,4, A4 ±74,6 / ±81,1 y E5 ±50,2 / ±54,5. Lo vigila
+`InterleavedGrids.TheUsableRangeIsTheDenseFormulaWithKappaNineTenths`.
+
+Fuera de ese rango el motor publica **ausencia** —NaN— en vez de un número. La detección gruesa se
+sigue publicando, así que el usuario conserva "qué nota es" cuando pierde "cuánto exactamente".
+
+**Un medidor de ±50 cents existe en toda cuerda del catálogo (B0 a E5), a 44,1 y 48 kHz**
+(`InterleavedGrids.EveryCatalogStringIsMeasuredWithinPlusMinusFiftyCents`; el borde de E5 a
+44,1 kHz —lee a ±50, no a ±51— lo fija `TheEdgeOfTheCatalogE5At44kReadsAtFiftyAndNotAtFiftyOne`),
+**salvo un hueco declarado** a 44,1 kHz (no pasa a 48 kHz): B0 y E1 desde +25 cents, con el
++25 incluido (D30), quedan fuera de la promesa: en los casos medidos no hay lectura fina porque la
+compuerta de tendencia reinicia en bucle (preexistente). E1 a +25 c sí lee, pero el contrato no lo
+promete. Lo fija
+`InterleavedGrids.TheDeclaredGapB0AndE1From25CentsAt44kHasNoFineReadingButTheCoarseOne`, que da rojo el día que se cierre.
+Con 2 parciales admitidos —el caso común a ±50 c en las agudas, junto con el de 1— REQ-058 verificó
+la σ de la lectura temprana (la tabla de cobertura de arriba, filas de 2 parciales); con 1 no cubre. La del camino del
+veredicto sigue siendo la de antes, y no cubre: es el hueco declarado al final de este documento.
 
 **El motor lo publica**, en el índice 14 del snapshot y en cents, computado contra el objetivo y
 el rate vigentes (`usableRangeCents` en Kotlin, `null` sin objetivo). Un consumidor no tiene que
-conocer `N` ni rehacer la conversión: dibuja el tramo donde la aguja es confiable y advierte en
+conocer `H` ni rehacer la conversión: dibuja el tramo donde la aguja es confiable y advierte en
 el resto. Que ese número y la guarda no puedan divergir lo verifica
-`AnalysisThread.ThePublishedRangePredictsWhereTheFineReadingExists`, que falla tanto si el rango
-publicado se **infla** como si se **achica**.
+`AnalysisThread.ThePublishedRangePredictsWhereTheFineReadingExists` a 0,97 y 1,03 del rango
+publicado, que falla tanto si el rango se **infla** como si se **achica**.
 
-⚠️ **Lo que esto le dice a un consumidor que dibuja un medidor de ±50 cents:** existe en E2, A2,
-D3 y G3, y **no** en B3, E4 ni A4. Ensancharlo exige bajar `N`, que mueve el presupuesto de
-exactitud entero y no está en este REQ.
+**Cadencia (REQ-057, D31).** El snapshot se publica cada 1024 frames de audio analizado (≈ 23 ms a
+44,1 kHz), con el rms de esos 1024 frames, y nunca antes de los primeros 1024. La serie de
+publicaciones no depende del tamaño de bloque con el que llega el audio
+(`BlockSize.ThePublicationSeriesDoesNotDependOnTheBlockSize`, y sobre `corpus-v1`
+`CorpusRobustness.TheRatchetHoldsForEveryBlockSize` con bloques de 16, 256, 1000 y 8192).
+
+El modo rápido decide una vez por veredicto grueso nuevo dentro del tick, no una vez por drenado:
+sus contadores (soltar el enganche tras `kSilentUpdatesToRelease` lecturas sin altura, el «quieto»
+de `kStableCentsPerUpdate`) cuentan veredictos. En vivo, soltar el enganche en silencio pasa a
+tardar tres veredictos del detector en vez de tres drenados (propuesta, a medir en device).
+
+**Costo.** Las cuatro rejillas cuadruplican el fino; el costo en host (Debug) lo imprime
+`InterleavedGridsCost.TheFourGridsCostAFractionOfRealTimeAndTheNumberIsPrinted` (en su corrida de
+REQ-057 S1, host de desarrollo a 48 kHz: el fino de 4 parciales de 0,134 % a 0,537 % del tiempo real y el análisis
+entero, 1,81 %; la cifra vigente es la que imprime el test). En device no está medido.
 
 **Latencias por modo:** detección gruesa ≤ 100 ms desde el onset; conmutación de cuerda en modo
-rápido 85,3 ms; el strobe declara convergencia cuando 1σ ≤ 0,1 cents, lo que en la cuerda más
-grave del catálogo (B0) ocurre pasados los **0,5 s** y en A4 es inmediato.
+rápido 85,3 ms; **lectura temprana** (`cents` + σ en `MEASURING`, REQ-058) a **0,186 s** de mediana
+del ataque y 0,206 s de p90 sobre `corpus-v1` con objetivo = la cuerda elegida, 80 de 82 ataques
+con lectura en 500 ms, y `cents` en el 98,7 % del tiempo pasados 250 ms
+(`EarlyReadingCorpus.FirstReadingWithinTheBudget`, `…EveryAttackReadsWithin500msAndKeepsReading`);
+un re-punteo de la misma nota vuelve a leer a 0,183 s de mediana sin perder lo integrado. El strobe
+declara `CONVERGED` sólo con el veredicto de 12 ventanas (1,02 s a 48 kHz, 1,11 a 44,1) y 1σ ≤ 0,1
+cents: nunca antes del veredicto, aunque la σ temprana ya esté por debajo (en A4 lo está desde la
+primera lectura).
 
 🔴 **σ NO ES SUFICIENTE PARA DECLARAR CONVERGENCIA, y esa es la segunda vez que pasa (REQ-009).**
 `1σ ≤ 0,1 cents` es **necesario y no suficiente**: σ mide la linealidad del ajuste, y una señal
@@ -157,6 +234,15 @@ de captura y **no lo reporta** es indetectable. El motor converge sobre ese huec
 saberlo. Está escrito como test (`CaptureDiscontinuity.NobodyReportedItSoNobodyCanKnow`) para que
 el día que entre un backend nuevo sin reportar, se sepa exactamente qué se pierde.
 
+**Con las rejillas de REQ-057 esto empeora un poco, y se dice.** Un hueco aislado de 512 frames
+sin reportar en A4 a 48 kHz sale `CONVERGIDO` con 0,873 c de error a +10 c (σ 0,061), contra
+0,641 c (σ 0,099) del motor anterior, y ahora también publica lectura fina a +50 c (0,449 c,
+σ 0,076), donde antes no había lectura. Lo fija
+`InterleavedGrids.ASingleUnreportedLostGapStillPublishesAConvergedReadingOffByLessThanOneCent`.
+La guarda de coherencia de la serie densa (0,3 rad, D33 de REQ-057) frena el hueco **periódico**
+(`NobodyReported…` sigue sin lectura), no el aislado: con 0,2 rad desaparece el caso de +50 c, pero
+ese umbral queda a 1,1× del máximo sano del barrido grande (0,178 rad). Queda para un MINI.
+
 **El motor lo publica**, en el índice 15 del snapshot (`inputDiscontinuity` en Kotlin): distingue
 *"todavía no convergí"* —esperar— de *"la entrada llegó rota"* —revisar el cable—, que son dos
 acciones opuestas para el usuario. **No** es `droppedFrames > 0`: ese contador es acumulado y
@@ -175,8 +261,11 @@ compuerta).
 | **CPU sostenido en dispositivo** (NFR-1) | 🔴 **sin medir.** Todo número de costo que imprima la suite es un **techo**, no la medida: el build de host compila en `Debug`. Requiere hardware. |
 | **Sesión de 10 min sin throttling** (NFR-5) | 🔴 **sin medir.** Requiere hardware. |
 | **Robustez contra corpus grabado** (NFR-8) | 🔴 **sin correr.** El corpus no existe todavía; el mecanismo para bajarlo y verificarlo sí (`scripts/fetch-corpus.sh`), y los tests que dependen de él salen **SKIPPED**, nunca PASSED. |
+| **`CONVERGED` de un punteo sobre ruido de sala** (REQ-058) | 🔴 **sin medir.** Un ataque que no sale del silencio (rms ≥ 0,001, como el ruido del teléfono) abre un segmento y descarta las fases previas; antes se arrastraban hasta el reinicio por quiebre. El corpus no lo ejerce (pre-rolls de silencio). Lo mediría una síntesis con ruido a −45 dBFS antes del punteo, corrida en 2.25 y en 2.26. |
+| **σ de la lectura temprana con 1 parcial** (REQ-058) | 🔴 **hueco declarado.** Sobre síntesis estable de un parcial, cobertura 2σ 0 (n = 480) y σ / error 0,01: la σ es la propagada, y sin ajuste estirado la lectura es la del parcial, no f0. Fuente: `EarlyReading.AStableNoteDoesNotInflateSigma`. |
+| **σ de las lecturas MEASURING del camino del veredicto** (REQ-058, D50) | 🔴 **hueco declarado.** Contra el oráculo corto de f0 de corpus-v1 y con su ruido propio sumado (\|err\| ≤ 2·√(σ² + σ_or²)), las MEASURING que salen del veredicto (12 ventanas, σ > 0,1) cubren 0,567 en (0,25, 1] s con k ≥ 3 (n = 238), 0,833 asentadas con k = 2 (n = 288) y 0,724 asentadas con k ≥ 3 (n = 2501); las tempranas, 0,951 / 0,963 / 0,937. Su σ es la de hoy con la deriva temprana como piso; `CONVERGED` no está en el hueco (lo juzga el trinquete). Fuente: `EarlyReadingCorpus.MeasuringIsCoveredPerStratumAgainstF0`. |
 
-Estas tres filas están vacías **a propósito**. Una corrida que no verificó no puede pasar por
+Estas filas están vacías **a propósito**. Una corrida que no verificó no puede pasar por
 una que sí — la misma regla que gobierna `regen-golden.sh` y la atestación del gate local.
 
 ---
@@ -191,4 +280,6 @@ fast_mode_sweep_switches = 0
 intonation_worst_error_cents = 0.0001
 inharmonicity_max_correction_cents = 2.4678
 crystal_50ppm_cents = 0.0866
+early_worst_error_cents = 0.118808
+early_worst_error_sigmas = 0.2308
 -->

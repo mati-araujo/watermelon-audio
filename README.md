@@ -180,9 +180,10 @@ engine.release()
 
 | Library | Version | License |
 |---------|---------|---------|
-| Oboe | 1.10.0 | Apache 2.0 |
+| Oboe | 1.11.0 | Apache 2.0 |
 | kotlinx-coroutines | 1.10.2 | Apache 2.0 |
 | TinySoundFont | 0.9 | MIT |
+| pffft | 1.3.1 | FFTPACKv5 (BSD-like) |
 | AndroidX Core KTX | 1.18.0 | Apache 2.0 |
 | AndroidX DataStore | 1.2.1 | Apache 2.0 |
 | AndroidX Lifecycle | 2.10.0 | Apache 2.0 |

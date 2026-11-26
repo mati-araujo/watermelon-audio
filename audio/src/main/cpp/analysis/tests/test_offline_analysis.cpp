@@ -16,6 +16,7 @@
 #include "../AnalysisSnapshot.h"
 #include "../AnalysisThread.h"
 #include "../OfflineAnalysis.h"
+#include "tests/support/SnapshotRead.h"
 #include "tests/support/TestWait.h"
 
 #include <gtest/gtest.h>
@@ -155,10 +156,17 @@ double realtimeCents(const std::vector<float>& buf, int frames) {
         return snap.read(v) && v[kSnapFramesAnalyzed] >= static_cast<float>(frames) * 0.9f;
     }, std::chrono::seconds(10));
 
+    // MINI-043: con el thread vivo, un `read()` a mitad de un publish daba false
+    // y salia como NaN — o sea como "el camino vivo no publico", que es otra
+    // cosa. Se lee coherente; NaN queda solo para "nunca se publico".
     float v[kSnapshotValueCount];
-    const bool ok = snap.read(v);
+    const wma_test::SnapshotRead got = wma_test::readCoherent(snap, v);
     th.stop();
-    return ok ? static_cast<double>(v[kSnapCents]) : NAN;
+    if (got == wma_test::SnapshotRead::kTimedOut) {
+        ADD_FAILURE() << "no se pudo leer el snapshot del camino vivo: "
+                      << wma_test::describe(got);
+    }
+    return got == wma_test::SnapshotRead::kCoherent ? static_cast<double>(v[kSnapCents]) : NAN;
 }
 
 /**

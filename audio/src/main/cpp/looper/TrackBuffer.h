@@ -1,5 +1,6 @@
 #pragma once
 
+#include "OnsetDetection.h"
 #include "PanLUT.h"
 #include "TrackStorage.h"
 #include "../platform/Logger.h"
@@ -10,6 +11,41 @@
 #include <vector>
 #include <cstring>
 #include <cmath>
+
+namespace wm {
+
+/// Minimo de una region de loop, topeado a lo que queda de pista desde el start.
+constexpr int kMinLoopRegionFrames = 1024;
+
+struct LoopRegion {
+    int start = 0;
+    int end = 0;   ///< exclusivo
+};
+
+/**
+ * @brief Region de loop [start, end) sobre una pista de `length` frames; `end <= 0` = hasta
+ *        el final.
+ *
+ * Siempre queda dentro de la pista y no vacia: `0 <= start < end <= length`. Una region mas
+ * corta que `kMinLoopRegionFrames` se estira por el FIN hasta el minimo, pero nunca mas alla de
+ * `length`: si la pista (o lo que queda desde `start`) es mas corta que el minimo, la region
+ * llega hasta el final y nada mas. No se inventa audio. `length <= 0` da {0, 0}.
+ *
+ * Antes era `std::clamp(end, s + 1024, length)`: con `s + 1024 > length` el rango quedaba
+ * invertido (UB) y el fin terminaba PASADO el largo (toma de 59 frames → region [0, 1024),
+ * NoisyPad S10 sobre 2.22.1). Es una funcion libre porque la comparten `setLoopRegion` y el
+ * recorte horneado de los clips de la cancion programada.
+ */
+inline LoopRegion clampLoopRegion(int start, int end, int length) {
+    if (length <= 0) return {};
+    const int s = std::clamp(start, 0, length - 1);
+    int e = (end <= 0) ? length : std::clamp(end, s + 1, length);  // s + 1 <= length
+    const int minLen = std::min(kMinLoopRegionFrames, length - s);
+    if (e - s < minLen) e = s + minLen;
+    return {s, e};
+}
+
+}  // namespace wm
 
 /**
  * @class TrackBuffer
@@ -32,6 +68,9 @@ class TrackBuffer {
 public:
     static constexpr int CROSSFADE_FRAMES = 128;  // ~2.7ms @ 48kHz — minimum/fallback for very short loops
     static constexpr float DEFAULT_SEAM_CROSSFADE_MS = 50.0f;  // long, musical crossfade at the loop seam
+    // Minimo de una region de loop pedida con setLoopRegion, topeado a lo que queda de
+    // pista desde el start (ver setLoopRegion).
+    static constexpr int MIN_LOOP_REGION_FRAMES = wm::kMinLoopRegionFrames;
 
     TrackBuffer() = default;
     ~TrackBuffer() = default;
@@ -691,12 +730,16 @@ public:
 
     // ========== Loop Region (lock-free) ==========
 
+    /**
+     * @brief Region de loop [start, end) en frames; `end <= 0` = hasta el final. Los limites
+     *        los fija `wm::clampLoopRegion` (no queda vacia ni pasa el largo de la pista).
+     */
     void setLoopRegion(int start, int end) {
         int length = mLengthFrames.load(std::memory_order_acquire);
         if (length <= 0) return;
-        int s = std::clamp(start, 0, length - 1);
-        int e = (end <= 0) ? length : std::clamp(end, s + 1024, length);
-        if (e - s < 1024) e = std::min(s + 1024, length);  // Enforce minimum
+        const wm::LoopRegion region = wm::clampLoopRegion(start, end, length);
+        const int s = region.start;
+        const int e = region.end;
         mLoopStart.store(s, std::memory_order_release);
         mLoopEnd.store(e, std::memory_order_release);
 
@@ -795,88 +838,13 @@ public:
     int detectOnsets(int* outOnsets, int maxOnsets,
                      int hopFrames, float sensitivity) const {
         if (!outOnsets || maxOnsets <= 0) return 0;
-        if (hopFrames < 32) hopFrames = 32;
         const int len = mLengthFrames.load(std::memory_order_acquire);
-        if (len <= hopFrames * 4) return 0;
         if (mStore.capacityFrames() < len) return 0;
-
-        const int numWin = len / hopFrames;
-        if (numWin < 4) return 0;
-
-        std::vector<float> energy, smoothed, flux;
-        try {
-            energy.assign(static_cast<size_t>(numWin), 0.0f);
-            smoothed.assign(static_cast<size_t>(numWin), 0.0f);
-            flux.assign(static_cast<size_t>(numWin), 0.0f);
-        } catch (...) {
-            return 0;
-        }
-
-        // 1) Short-time energy per window.
-        for (int w = 0; w < numWin; ++w) {
-            const int base = w * hopFrames;
-            float e = 0.0f;
-            for (int i = 0; i < hopFrames; ++i) {
-                const float l = mStore.sample(base + i, 0);
-                const float r = mStore.sample(base + i, 1);
-                e += l * l + r * r;
-            }
-            energy[w] = e;
-        }
-
-        // 1b) Smooth the energy (±2-window moving average) BEFORE the flux. A
-        // sustained/tonal note whose period exceeds the hop makes the raw windowed
-        // energy oscillate every block, which the flux reads as a stream of false
-        // onsets (a held synth pad reported >100 onsets / 6 s). Averaging over a few
-        // windows flattens that wobble while a real transient still steps the
-        // smoothed energy up sharply.
-        const int sm = 2;
-        for (int w = 0; w < numWin; ++w) {
-            const int a = std::max(0, w - sm);
-            const int b = std::min(numWin - 1, w + sm);
-            float sum = 0.0f;
-            for (int k = a; k <= b; ++k) sum += energy[k];
-            smoothed[w] = sum / static_cast<float>(b - a + 1);
-        }
-
-        // 2) Positive log-energy flux on the smoothed envelope.
-        for (int w = 1; w < numWin; ++w) {
-            const float d = std::log(smoothed[w] + 1e-9f) - std::log(smoothed[w - 1] + 1e-9f);
-            flux[w] = (d > 0.0f) ? d : 0.0f;
-        }
-
-        // 3) Adaptive peak-pick.
-        const float mult = (sensitivity > 0.01f) ? (1.0f / sensitivity) : 1.0f;
-        // Absolute log-energy flux floor (≈ +3 dB jump). The adaptive threshold
-        // alone adapts UP with the local flux, so sustained/tonal material (whose
-        // windowed energy wobbles every block) trips it constantly — a take of a
-        // held synth pad reported ~88 onsets / 5 s. A real transient jumps energy
-        // by several dB (flux ≫ this); steady-tone wobble does not. Scales with the
-        // sensitivity knob so the param still works.
-        const float minFlux = 0.5f * mult;
-        const int half = 8;  // local-mean window (± windows)
-        const int minGapWin =
-            std::max(1, static_cast<int>(0.05f * static_cast<float>(mSampleRate)
-                                         / static_cast<float>(hopFrames)));
-        int count = 0;
-        int lastOnsetWin = -minGapWin - 1;
-        for (int w = 1; w < numWin - 1 && count < maxOnsets; ++w) {
-            const float f = flux[w];
-            if (f <= minFlux) continue;
-            const int a = std::max(1, w - half);
-            const int b = std::min(numWin - 1, w + half);
-            float sum = 0.0f;
-            int n = 0;
-            for (int k = a; k < b; ++k) { sum += flux[k]; ++n; }
-            const float localMean = (n > 0) ? sum / static_cast<float>(n) : 0.0f;
-            const float threshold = localMean * 1.5f * mult + 1.0e-4f;
-            if (f > threshold && f >= flux[w - 1] && f > flux[w + 1]
-                && (w - lastOnsetWin) >= minGapWin) {
-                outOnsets[count++] = w * hopFrames;
-                lastOnsetWin = w;
-            }
-        }
-        return count;
+        // El algoritmo vive en OnsetDetection.h: el mismo corre sobre un buffer cualquiera
+        // (`wma_detect_onsets`, el re-render de Studio).
+        return wma::onset::detect(
+            [this](int frame, int channel) { return mStore.sample(frame, channel); },
+            len, mSampleRate, hopFrames, sensitivity, outOnsets, maxOnsets);
     }
 
     /**

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  El manifest que AGP EMPAQUETA en el AAR. Con el plugin de Kotlin Multiplatform, el source set
+  `main` de Android lee `src/androidMain/AndroidManifest.xml`; el viejo `src/main/AndroidManifest.xml`
+  NO entra al artefacto (medido en REQ-050 S2 con diff-published-artifact.py: el AAR de 2.21.0 no
+  lleva ni su RECORD_AUDIO ni sus uses-feature).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      REQ-050 S2 (D9, AC-050.7): UsbAudioManager.startStreaming toma un wake lock parcial para que
+      el streaming USB siga con la pantalla apagada. Sin este permiso, en una app que no lo declara
+      PowerManager tira SecurityException (medido en el g42 con el harness, MINI-041 #5). Es un
+      permiso normal, concedido al instalar, y llega a la app por el merge del manifest.
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+</manifest>

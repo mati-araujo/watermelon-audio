@@ -37,6 +37,7 @@
 
 #include "UsbAudioTypes.h"
 #include "LatencyProfile.h"
+#include "UsbLatencyMath.h"
 #include "AudioFormatConverter.h"
 #include "UsbLatencyProfiler.h"
 #include "AdaptiveBufferController.h"
@@ -482,6 +483,28 @@ public:
     /** Live adaptive jitter budget in ms, for telemetry / persistence (2.3). */
     int getJitterBudgetMs() const {
         return mJitterBudgetMs.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * REQ-050 S3 (AC-050.9, D16): output packets kept in flight — the declared queue depth,
+     * see usb::outputPacketsInFlightDepth for why it is not a live count. 0 without an
+     * output interface. Control-thread read of configuration fixed before start().
+     */
+    std::size_t getOutputInFlightDepthPackets() const {
+        if (!mOutputInterface) return 0;
+        return outputPacketsInFlightDepth(mConfig.numTransfers, mConfig.packetsPerTransfer);
+    }
+
+    /**
+     * REQ-050 S3 (AC-050.9, D16): the output latency ceiling this configuration can be held
+     * to, in ms (usb::declaredOutputLatencyCeilingMs), at the jitter budget's MAXIMUM.
+     * 0 without an output interface. Control-thread only.
+     */
+    float getDeclaredOutputLatencyCeilingMs(int dspBlockFrames) const {
+        if (!mOutputInterface) return 0.0f;
+        return declaredOutputLatencyCeilingMs(
+            mConfig.packetsPerTransfer * mConfig.framesPerPacket, mJitterBudgetMaxMs,
+            dspBlockFrames, mConfig.numTransfers, mConfig.sampleRate);
     }
 
     /** Per-session converged floor discovered by the adaptive loop (telemetry). */

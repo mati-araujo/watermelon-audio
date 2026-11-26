@@ -56,8 +56,21 @@ public:
      */
     void reset() override;
 
-private:
     static constexpr int MAX_DELAY_SAMPLES = 4800;  // 100ms at 48kHz
+
+    /// Los dos índices de la línea de delay, y la fracción entre ellos, para leer `delaySamples`
+    /// atrás de `writeIndex`. Es pura y RT-safe, y es pública para poder probar el borde:
+    /// `writeIndex - delaySamples` puede dar un negativo diminuto, y al sumarle
+    /// MAX_DELAY_SAMPLES en float redondea a 4800,0f exacto. Sin envolver, `index0` caía fuera de
+    /// la línea (lo vio la libstdc++ de GCC 15 con aserciones, 2026-11-10).
+    struct ReadTap {
+        int index0;
+        int index1;
+        float frac;
+    };
+    static ReadTap readTap(int writeIndex, float delaySamples);
+
+private:
     static constexpr int MAX_VOICES = 4;
 
     int mSampleRate{48000};

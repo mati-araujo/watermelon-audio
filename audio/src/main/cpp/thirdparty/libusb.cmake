@@ -138,8 +138,16 @@ target_compile_options(libusb_static PRIVATE
 
 add_library(libusb::libusb ALIAS libusb_static)
 
-# Export version for consumers
+# Export version for consumers. Se LEE de version.h en vez de escribirse a mano:
+# decia "1.0.27" con 1.0.29 vendorizado, y nada lo leia para notarlo (REQ-047 S1).
 set(LIBUSB_FOUND TRUE)
-set(LIBUSB_VERSION "1.0.27")
+file(STRINGS "${LIBUSB_SOURCE_DIR}/libusb/version.h" _libusb_ver_lines
+     REGEX "^#define LIBUSB_(MAJOR|MINOR|MICRO) [0-9]+")
+foreach(_part MAJOR MINOR MICRO)
+    string(REGEX REPLACE ".*#define LIBUSB_${_part} ([0-9]+).*" "\\1"
+           _libusb_${_part} "${_libusb_ver_lines}")
+endforeach()
+set(LIBUSB_VERSION "${_libusb_MAJOR}.${_libusb_MINOR}.${_libusb_MICRO}")
+message(STATUS "libusb version (version.h): ${LIBUSB_VERSION}")
 
 message(STATUS "libusb configured successfully (from git submodule)")

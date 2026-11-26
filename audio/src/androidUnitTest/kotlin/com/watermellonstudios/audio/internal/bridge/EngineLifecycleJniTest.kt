@@ -69,6 +69,12 @@ class EngineLifecycleJniTest {
          */
         private const val NO_FADE = 0
 
+        /** El fade del test `e`: corto, pero mayor que cero para que haya un worker que esperar. */
+        private const val CON_FADE = 80
+
+        /** `EngineState::Stopped`. */
+        private const val ESTADO_STOPPED = 0
+
         /**
          * Canales y modo que el "device" va a reportar, los dos DISTINTOS del default que
          * Kotlin inventaba (`channelCount = 2`, `isLowLatency = true`). Con los defaults,
@@ -259,6 +265,33 @@ class EngineLifecycleJniTest {
         assertNull(
             AudioNativeBridge.getInstance().getStreamInfoArray(),
             "con el stream cerrado la info tiene que ser ausente, no un array de defaults",
+        )
+    }
+
+    /**
+     * **AC-050.6 (REQ-050 S2, D11) — con fade, `stopEngineWithFade` vuelve con el motor PARADO.**
+     *
+     * El nativo arma el fade y un worker para el motor `fade + ~60 ms` después. Antes el
+     * `success` llegaba al instante, con el motor todavía en Running: quien reconfiguraba
+     * enseguida (`setUseBackendManager`, para pasar a USB) era rechazado en silencio.
+     *
+     * Bug que atrapa: sacar la espera del bridge. Sin ella el estado leído acá es 2 (Running).
+     * No hay espera en el test: la espera ES lo que se prueba, y la hace el bridge.
+     */
+    @Test
+    fun `e - con fade, parar devuelve exito recien con el motor nativo en Stopped`() {
+        HostTestHooks.setStartFails(false)
+        assertTrue(
+            jni("nativeStartEngineWithFade") { it.startEngineWithFade(NO_FADE) }.isSuccess,
+            "sin motor corriendo no hay nada que parar",
+        )
+
+        assertTrue(jni("nativeStopEngineWithFade") { it.stopEngineWithFade(CON_FADE) }.isSuccess)
+
+        assertEquals(
+            ESTADO_STOPPED,
+            AudioNativeBridge.getInstance().getEngineState(),
+            "stopEngineWithFade devolvió éxito con el motor todavía sin parar",
         )
     }
 }

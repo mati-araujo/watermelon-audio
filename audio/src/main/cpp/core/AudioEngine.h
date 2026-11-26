@@ -29,11 +29,13 @@ namespace oboe { class AudioStream; }
 #include "../looper/AudioLooper.h"
 #include "../looper/Transport.h"
 #include "../looper/PreRollRing.h"
+#include "../dsp/MasterStage.h"
 #include "FadeController.h"
 #include "ChordHarmony.h"
 
 // Forward declarations (full includes in AudioEngine.cpp)
 class InputNode;
+namespace watermelon_audio { class BackendManager; }
 
 // Include for shared_ptr atomic operations
 #include <memory>
@@ -184,8 +186,66 @@ public:
      */
     bool renderBlock(float* output, const float* input, int frames);
 
+    /**
+     * @brief Como renderBlock(), mas los taps de la mezcla de la cancion (REQ-055 S12).
+     *
+     * @param output      premezcla (con el perfil RAW) o la salida del perfil vigente.
+     * @param fx          frames*2 floats: el retorno del bus «Espacio», con el master del looper.
+     * @param tracks      trackCount*frames*2 floats: el seco post-fader/post-paneo de cada pista.
+     * @return false si no es un render offline en curso, o los argumentos no sirven.
+     *         `fx` y `tracks` se ponen en cero antes de renderizar; un bloque sin cancion los deja asi.
+     */
+    bool renderBlockTaps(float* output, float* fx, float* tracks, int trackCount, int frames);
+
+    // ===== Mezcla y master de la cancion (REQ-055 S12, ADR-0013) =====
+
+    /// Perfil de salida de applyMasterAndProtectOutput.
+    enum class OutputProfile : int {
+        Protected = 0,   ///< la cadena de siempre (default; Android e iOS)
+        Master = 1,      ///< MasterStage (ganancia + limitador true-peak) y despues el volumen de monitoreo
+        Raw = 2,         ///< nada. Solo una instancia offline
+    };
+
+    /// Crea (la primera vez) y publica el bus «Espacio». Control; el RT puede estar corriendo.
+    bool ensureSongBus();
+    /// Fija la mezcla de una pista de la cancion. Crea el bus la primera vez.
+    bool setSongMixTrack(int track, float gain, float pan, float send);
+    bool setSongMixSpace(const wm::SongSpaceParams& params);
+    /// Tiempo maximo del delay del bus «Espacio» (ms) al sample rate vigente: la linea del
+    /// DelayEffect tiene un largo fijo en muestras, asi que a 192 kHz son ~1000 ms, no 2000.
+    float songDelayMaxMs() const;
+    /// Parametros del master (cualquier hilo; los lee el RT una vez por bloque).
+    void setMasterStageParams(const wm::MasterParams& params) { mMasterStage.configureMaster(params); }
+    /// false si RAW y el motor no esta en un render offline (nunca salida sin proteger a un DAC).
+    bool setOutputProfile(OutputProfile profile);
+    OutputProfile getOutputProfile() const {
+        return static_cast<OutputProfile>(mOutputProfile.load(std::memory_order_acquire));
+    }
+    int masterStageLatencyFrames() const { return mMasterStage.latencyFrames(); }
+
     /// true si el motor arranco con startOffline() (WD-2.1).
     bool isOffline() const { return mOfflineMode.load(std::memory_order_acquire); }
+
+    /// El `maxBlockFrames` del render offline en curso; 0 fuera de el (REQ-055 S2).
+    int offlineMaxBlockFrames() const {
+        return mOfflineMaxBlockFrames.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief El `BackendManager` de ESTA instancia (REQ-055 S2).
+     *
+     * Hasta S2 el motor iba siempre a `BackendManager::getInstance()`, el global. Con
+     * un solo motor por proceso eran el mismo objeto; con una segunda instancia (el
+     * render offline de Studio) el motor offline le preguntaba el rate y el estado al
+     * stream del VIVO, y `setUseBackendManager(true)` le robaba el callback. Lo fija
+     * `wma_engine_create()`; sin fijar (un `AudioEngine` construido a mano en un
+     * test), cae al global como antes.
+     *
+     * No lo toma ownership. Se fija antes de usar el motor y no cambia despues.
+     */
+    void setBackendManager(watermelon_audio::BackendManager* manager) {
+        mBackendManager = manager;
+    }
 
     /**
      * @brief Detiene el motor con fade out
@@ -725,6 +785,12 @@ public:
         return mDualTouch.isEnabled();
     }
 
+    /// Sonda de tests (REQ-052): bloques en que el engine del slot del dual touch
+    /// se proceso (0 = principal, 1 = el otro). Ver DualTouchManager::slotBlocksRendered.
+    uint64_t dualTouchSlotBlocksRendered(int slot) const {
+        return mDualTouch.slotBlocksRendered(slot);
+    }
+
     // ========== INPUT NODE INTEGRATION (Full-Duplex Monitoring) ==========
 
     /**
@@ -969,6 +1035,14 @@ private:
                            int cachedEngineType, size_t cachedOscIndex,
                            bool cachedHasActiveModulator, size_t cachedModIndex);
 
+    /**
+     * Procesa la fuente de UN slot del dual touch (engine o, en Classic, el
+     * oscilador primario/secundario) en @p dst, con @p freq / @p amp, y lo
+     * cuenta en la sonda del slot. Thread de audio (REQ-052).
+     */
+    void renderDualSlotSource(int slot, SynthEngine* engine, size_t oscIndex,
+                              float* dst, int32_t numFrames, float freq, float amp);
+
     /** Render DUAL_TOUCH mode: two oscillators + mix + effects */
     void renderDualTouch(float* output, int32_t numFrames,
                          const TouchState& dualTouchState,
@@ -1148,6 +1222,16 @@ private:
     // DC blocker, limiter, soft clipper, ditherer + scratch buffer
     OutputStage mOutputStage;
 
+    // Perfil de salida (REQ-055 S12). `mOutputProfileSeen` es del thread de audio y de nadie mas:
+    // al ver MASTER por primera vez en una racha, el master arranca de cero (no suena lo que quedo
+    // en su linea de retardo de la ultima vez).
+    wm::MasterStage mMasterStage;
+    std::atomic<int> mOutputProfile{0};
+    int mOutputProfileSeen{0};
+    // El bus «Espacio» lo posee el motor (el looper guarda un puntero): nunca se libera con el RT vivo.
+    std::mutex mSongBusMutex;
+    std::unique_ptr<wm::ISongSpaceBus> mSongBus;
+
     // ========== WAVEFORM CAPTURE (RT-Safe, Phase 1E) ==========
     WaveformCapture mWaveformCapture;  // RT-safe double-buffered waveform
 
@@ -1184,6 +1268,23 @@ private:
     // call stop() on freed memory. Touched only from control threads.
     std::unique_ptr<std::thread> mStopFadeThread;
     std::atomic<bool> mStopFadeCancel{false};
+
+    // REQ-050 S2 (D8): hay un stopWithFade() con su rampa en curso. Un segundo stop
+    // con fade lo encuentra en true y NO re-arma la rampa (antes volvía a 1.0). Lo
+    // baja el worker justo antes de su stop(), o quien lo cancela.
+    std::atomic<bool> mStopFadePending{false};
+    // Serializa el manejo de mStopFadeThread entre threads de control: dos
+    // stopWithFade() concurrentes se pisaban el unique_ptr. El worker NO lo toma (sólo
+    // llama a stop(), que toma mStateMutex), así que joinearlo con éste tomado no
+    // puede deadlockear.
+    std::mutex mStopFadeMutex;
+
+    /**
+     * REQ-050 S2: recoge el worker de stopWithFade() si ya terminó, está en su stop()
+     * final, o quedó huérfano (el motor ya está Stopped por otro camino). Con un fade
+     * en curso no hace nada. Requiere mStopFadeMutex tomado y mStateMutex NO tomado.
+     */
+    void reapStaleStopFadeWorker();
 
     // IMPROVED: Manejo de memoria insuficiente (Fase 2.2.3)
     std::atomic<bool> mInitializationFailed{false};
@@ -1362,6 +1463,19 @@ private:
 #else
     std::atomic<bool> mUseBackendManager{true};
 #endif
+
+    // El manager propio (REQ-055 S2); nullptr = el global. Ver setBackendManager().
+    watermelon_audio::BackendManager* mBackendManager = nullptr;
+    watermelon_audio::BackendManager& ownBackendManager() const;
+
+    /**
+     * Reseteo EXPLICITO del estado de la cadena al iniciar un render offline
+     * (REQ-055 S2, ADR-0008 §2): colas de reverb/delay, fases de LFO y osciladores,
+     * generadores aleatorios, voces, estado de los engines y del arpegiador. Lo
+     * llama `startOffline()` despues de preparar y antes de publicar Running: sin
+     * thread de audio en un motor offline, no hay nadie con quien carrerear.
+     */
+    void resetChainForOfflineRender();
 
     // Pre-allocated AudioBuffers for node-based processing
     AudioBuffer mOscillatorBuffer;  // Oscillator output (non-interleaved)

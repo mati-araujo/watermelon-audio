@@ -56,12 +56,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 enable_testing()
 
 include(FetchContent)
-FetchContent_Declare(googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.15.2
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+# El pin de googletest vive en UN solo lugar (REQ-047 S4).
+include(${CMAKE_CURRENT_LIST_DIR}/../../thirdparty/googletest.cmake)
 
 set(WMA_CPP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
@@ -105,6 +101,18 @@ endif()
 # a query returns with no engine, the difference between the engine's default
 # fade and an explicit one — lives in watermelon_audio.cpp. Testing AudioEngine
 # alone would no longer cover it. See test_c_api_lifecycle.cpp.
+# La capa de plataforma de la suite de host: Windows (REQ-061) o POSIX. En macOS y Linux sigue siendo
+# PlatformAndroid.cpp, como siempre (ver el comentario de la lista).
+if(WIN32)
+    set(WMA_PLATFORM_OS_SOURCES
+        ${WMA_CPP_ROOT}/platform/PlatformWindows.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFileWindows.cpp)
+else()
+    set(WMA_PLATFORM_OS_SOURCES
+        ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp
+        ${WMA_CPP_ROOT}/platform/MappedFilePosix.cpp)
+endif()
+
 set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
     ${WMA_CPP_ROOT}/core/AudioEngine.cpp
@@ -119,11 +127,11 @@ set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
     ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
     ${WMA_CPP_ROOT}/platform/Logger.cpp
-    # Despite the name, this file is plain POSIX + inline asm with the only
+    # Despite the name, PlatformAndroid.cpp is plain POSIX + inline asm with the only
     # __ANDROID__ guard inside setAudioThreadPriority(). AudioEngine::start()
     # calls flushDenormals(), so the real implementation is compiled in rather
     # than stubbed — one less divergence between host and device behaviour.
-    ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp
+    ${WMA_PLATFORM_OS_SOURCES}
     ${WMA_CPP_ROOT}/backends/BackendManager.cpp
     ${WMA_CPP_ROOT}/backends/SplitBackend.cpp
     ${WMA_CPP_ROOT}/backends/DriftResampler.cpp
@@ -144,9 +152,17 @@ add_executable(core_tests
     test_capture_gap_mailbox.cpp
     test_capture_sample_rate.cpp
     test_offline_render.cpp
+    test_offline_handle.cpp
+    test_offline_static_state.cpp
+    test_offline_render_checks.cpp
+    test_offline_rerender.cpp
+    test_c_api_detect_onsets.cpp
     test_fx_track_routing.cpp
     test_fade_lifecycle.cpp
+    test_usb_stream_start.cpp
+    test_usb_selection_request.cpp
     test_capture_requests.cpp
+    test_capture_ownership.cpp
     test_c_api_lifecycle.cpp
     test_c_api_master_bus.cpp
     test_c_api_input.cpp
@@ -154,29 +170,37 @@ add_executable(core_tests
     test_c_api_synth.cpp
     test_c_api_engine_params.cpp
     test_soundfont_load.cpp
+    test_mapped_file.cpp
+    test_utf8_paths.cpp
     test_minimal_soundfont_modulators.cpp
     test_soundfont_note_on.cpp
     test_soundfont_default_two_identity.cpp
     test_soundfont_fine_tune_keytrack.cpp
     test_soundfont_envelopes.cpp
     test_soundfont_note_on_destinations.cpp
-    test_soundfont_effects_send.cpp
     test_soundfont_filter.cpp
     support/tml_impl.cpp
     test_sf_spec_conformance.cpp
     test_touch_expression.cpp
     test_touch_expression_surface.cpp
     test_touch_expression_channel_layer.cpp
+    test_dual_touch_envelope.cpp
     test_initial_attenuation_generator.cpp
     test_c_api_voice.cpp
     test_c_api_soundfont_ambience.cpp
     test_c_api_mode.cpp
     test_c_api_analysis.cpp
     test_c_api_tuner.cpp
+    test_c_api_tuner_dump.cpp
     test_c_api_transport.cpp
     test_c_api_diagnostics.cpp
     test_c_api_looper.cpp
     test_c_api_looper_analysis.cpp
+    test_c_api_song.cpp
+    test_song_mix.cpp
+    test_output_profiles.cpp
+    test_c_api_mix.cpp
+    support/rtalloc_counter.cpp
     test_time_dependence_probe.cpp
     test_c_api_routing.cpp
     test_c_api_logcapture.cpp
@@ -228,7 +252,48 @@ target_link_libraries(core_tests PRIVATE
 )
 
 include(GoogleTest)
-gtest_discover_tests(core_tests)
+wma_gtest_discover_tests(core_tests)
+
+# MINI-057 D20: el test de costo pareado de la compuerta de envios (SoundFontEffectsSendEngine.
+# TheUnitsCostLessThanTheVoicesAndTheGateAFractionOfThat) vive en SU PROPIO ejecutable, todo a -O0.
+# Compara lambdas cuyo costo relativo depende del optimizador y a -O1 cambia de veredicto:
+# AppleClang daba la compuerta a 3,45x contra su techo de 1,5x (run 42928259678) y GCC 15.2 a 3,66x
+# en un intento (run 42971401043). La premisa escrita del test es que NINGUN lado de sus dos pares
+# vectoriza, y eso vive en lo que ejecutan las lambdas (reverb, chorus y tsf), no en la TU.
+# Por que no un -O0 por archivo dentro de core_tests (D17, revertido): SoundFontReverb::
+# addReverbWetFromMono y SoundFontChorus::addChorusWetFromMono son `inline`; otras TUs a -O1 del
+# mismo ejecutable (test_c_api_engine_params.cpp, test_soundfont_load.cpp) emiten su copia COMDAT y
+# GNU ld se queda con la primera: el test medido a -O0 ejecutaba reverb y chorus a -O1 (unidades/tsf
+# 0,32x-0,39x contra ~1,08x en master; run 42950016735). Ningun orden de archivos ni lista de TUs lo
+# arregla de forma estable. Lo unico que no depende de quien emite la copia es que en el binario que
+# mide NO exista ninguna TU a -O1: el test, tsf, SoundFontManager.cpp y Logger.cpp (lo unico que
+# el link pide) son fuentes DEL TARGET, y el -O0 de target_compile_options va ULTIMO en la linea,
+# despues del WMA_TESTS_OPT de tests/CMakeLists.txt. Ninguna libreria del repo se linkea (D25): una
+# dependencia nueva a -O1 falla en el link en vez de mezclar niveles sin aviso. GTest (gtest y
+# gtest_main) SI queda al nivel de la suite (-O1; -O0 en TSan, Windows D29 y macOS D23); no importa porque el test gana el COMDAT por orden de objeto (los
+# objetos del ejecutable van antes que las .a) y gtest no emite nada de lo medido. El resto de la
+# suite: -O1 (TSan -O0, D6; Windows -O0, D29; macOS -O0, D23).
+add_executable(core_cost_tests
+    test_soundfont_effects_send.cpp
+    ${WMA_CPP_ROOT}/engines/SoundFontManager.cpp
+    ${WMA_CPP_ROOT}/platform/Logger.cpp
+    ${WMA_CPP_ROOT}/thirdparty/tinysoundfont/tsf_impl.cpp
+)
+# Mismo `-w` que el target `tinysoundfont`: es codigo de terceros.
+set_source_files_properties(${WMA_CPP_ROOT}/thirdparty/tinysoundfont/tsf_impl.cpp
+    PROPERTIES COMPILE_OPTIONS -w)
+target_compile_options(core_cost_tests PRIVATE -O0)
+target_include_directories(core_cost_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${WMA_CPP_ROOT}
+    ${WMA_CPP_ROOT}/engines
+    ${WMA_CPP_ROOT}/thirdparty/tinysoundfont
+)
+target_link_libraries(core_cost_tests PRIVATE
+    GTest::gtest_main
+    Threads::Threads
+)
+wma_gtest_discover_tests(core_cost_tests)
 
 # REQ-040, criterio de muerte (I-2): el render de host que produce el Δ_host = 1/1 − 0/0 por
 # preset. EXCLUDE_FROM_ALL a proposito: no es un test, no lo construye el gate ni el CI, y no

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -13,13 +14,33 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.Card
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.watermellonstudios.audio.api.AudioEngineFactory
+import com.watermellonstudios.audio.api.AudioInputFactory
+import com.watermellonstudios.audio.api.InternalWatermelonApi
+import com.watermellonstudios.audio.api.TunerFactory
+import com.watermellonstudios.audio.harness.smoke.HarnessSmoke
+import com.watermellonstudios.audio.harness.smoke.ListeningWindows
+import com.watermellonstudios.audio.harness.smoke.SmokePlanRunner
+import com.watermellonstudios.audio.harness.smoke.SmokeReporter
+import com.watermellonstudios.audio.harness.smoke.SmokePreconditions
+import com.watermellonstudios.audio.harness.smoke.SmokeSink
+import com.watermellonstudios.audio.harness.smoke.TunerProbe
+import com.watermellonstudios.audio.harness.smoke.TunerWindows
+import com.watermellonstudios.audio.harness.smoke.stopEngineForUsb
+import com.watermellonstudios.audio.harness.soundfont.BridgeSoundFontPort
+import com.watermellonstudios.audio.harness.soundfont.Fixtures
+import com.watermellonstudios.audio.harness.soundfont.SoundFontCheck
+import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import kotlinx.coroutines.launch
 
 /**
@@ -40,9 +61,17 @@ import kotlinx.coroutines.launch
  * requisito de la etapa, no una concesion: si el harness espera al design
  * system, la pregunta de si el input path de iOS captura se sigue sin contestar
  * mientras tanto.
+ *
+ * ## MINI-038: el slot de plataforma y el smoke por adb
+ *
+ * [platform] trae lo que sólo existe en una plataforma (USB, el selector por fd, a dónde van las
+ * líneas `HARNESS-SMOKE`) sin expect/actual: ver [HarnessPlatform]. Si el shell pasó un
+ * [SmokeRequest], la corrida automática arranca sola al componer; los botones de los paneles
+ * emiten las mismas líneas con `run=ui`.
  */
+@OptIn(InternalWatermelonApi::class)
 @Composable
-fun HarnessApp() {
+fun HarnessApp(platform: HarnessPlatform) {
     val scope = rememberCoroutineScope()
 
     // El motor sobrevive a las recomposiciones y se libera con la pantalla. Sin
@@ -53,6 +82,53 @@ fun HarnessApp() {
     }
 
     val state by engine.state.collectAsState()
+
+    // Las líneas HARNESS-SMOKE van al sink de la plataforma Y a la vista de abajo: la pantalla y
+    // el log no pueden contar dos historias distintas. La pantalla sólo CALLA lo que tiene que ser
+    // ciego para el oyente (D7): qué ventana fue estímulo y cuál control, y la semilla.
+    val smokeLines = remember { mutableStateListOf<String>() }
+    val sink = remember {
+        SmokeSink { line ->
+            platform.smokeSink.emit(line)
+            smokeLines.add(HarnessSmoke.forScreen(line))
+            while (smokeLines.size > MAX_SMOKE_LINES) smokeLines.removeAt(0)
+        }
+    }
+    val uiReporter = remember { SmokeReporter(sink, run = "ui") }
+    val bridge = remember { getAudioBridge() }
+    val sfPort = remember { BridgeSoundFontPort(bridge, engine) }
+    val sfCheck = remember { SoundFontCheck(sfPort) }
+    val fixtures = remember { Fixtures(platform.writeFile) }
+
+    platform.smokeRequest?.let { request ->
+        // REQ-053 S4: una VISTA de la entrada, para medir el piso mientras el afinador es su dueño y
+        // para cerrar la captura al terminar cada fase (`ITuner.stop()` no la cierra). Nunca `release`,
+        // que le quitaría el nodo.
+        val tunerInput = remember { AudioInputFactory.create() }
+        LaunchedEffect(request) {
+            SmokePlanRunner(
+                engine = engine,
+                input = AudioInputFactory.create(),
+                playFrame = { bridge.transportGetPlayFrame() },
+                engineState = { bridge.getEngineState() },
+                soundFont = sfCheck,
+                fixtures = fixtures,
+                usb = platform.usbSmoke,
+                windows = ListeningWindows(sfPort),
+                tuner = TunerWindows(
+                    port = sfPort,
+                    newTuner = { TunerFactory.create(it) },
+                    probe = object : TunerProbe {
+                        override fun inputPeak(): Float? = tunerInput.metering()?.peakLinear
+                        override fun engineTargetHz(): Float? = bridge.getTunerTargetHz()
+                        override fun inputRunning(): Boolean = tunerInput.isRunning
+                        override fun stopInput() = tunerInput.stop()
+                    },
+                    floorThresholdDbfs = request.thresholdsDbfs[SmokePreconditions.SILENCE_FLOOR],
+                ),
+            ).run(request.plan, SmokeReporter(sink, run = request.run), request.problem, request.seed)
+        }
+    }
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
@@ -116,7 +192,56 @@ fun HarnessApp() {
                 // dispositivo, es EL CONTROL DE AC-010.1: no tiene @OptIn, asi
                 // que su compilacion afirma que `TunerFactory` alcanza sin tocar
                 // la superficie interna. Ver el KDoc de TunerControl.
-                TunerControl()
+                TunerControl(readSink = platform.tunerReadSink)
+
+                // Control 9b — grabar lo que el afinador ve (REQ-055). Aparte de TunerControl a
+                // proposito: ese archivo no puede tener @OptIn; este llega al puente interno.
+                TunerInputDumpControl(platform.dumpDir, platform.smokeSink)
+
+                // Control 10 — SoundFont (MINI-038): los fixtures .sf2/.sf3 generados, y en
+                // Android el selector del sistema por fd.
+                SoundFontControl(sfPort, sfCheck, fixtures, uiReporter, platform.soundFontExtras)
+
+                // Control 11 — USB (MINI-038). Sólo Android lo tiene; en iOS el lugar lo dice.
+                val usbPanel = platform.usbPanel
+                if (usbPanel != null) {
+                    usbPanel(uiReporter) { stopEngineForUsb(engine, { bridge.getEngineState() }, uiReporter) }
+                } else {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            USB_NOT_APPLICABLE,
+                            modifier = Modifier.padding(12.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+
+                // Las últimas líneas HARNESS-SMOKE, tal cual las ve el script.
+                SmokeLogView(smokeLines)
+            }
+        }
+    }
+}
+
+/** El texto del lugar del panel USB cuando la plataforma no lo tiene. AC-5 lo busca tal cual. */
+const val USB_NOT_APPLICABLE = "USB no aplica en iOS"
+
+private const val MAX_SMOKE_LINES = 60
+
+@Composable
+private fun SmokeLogView(lines: List<String>) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("HARNESS-SMOKE", style = MaterialTheme.typography.titleMedium)
+            if (lines.isEmpty()) {
+                Text("sin líneas todavía", style = MaterialTheme.typography.bodySmall)
+            }
+            lines.asReversed().forEach { line ->
+                Text(
+                    line.removePrefix("HARNESS-SMOKE "),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                )
             }
         }
     }

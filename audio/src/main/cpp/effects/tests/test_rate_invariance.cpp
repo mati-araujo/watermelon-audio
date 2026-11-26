@@ -97,10 +97,10 @@ std::vector<float> filterIr(int rate, int typeId, float cutoffHz, float q) {
 /**
  * Efectos cuyo nivel de salida NO se puede medir de forma reproducible.
  *
- * `RANDOM_RESO` sortea un LFO `RANDOM_SMOOTH`, y `LFO::randomFloat()` siembra su
- * generador con `std::random_device`: dos instancias recien construidas ya
- * difieren, sin que nada las haya tocado. Ya estaba excluido del test bit a bit
- * de WD-3.2 por lo mismo.
+ * VACIO desde REQ-055 S2. Tenia a `RANDOM_RESO`: su LFO `RANDOM_SMOOTH` sembraba
+ * con `std::random_device` y dos instancias recien construidas ya diferian (16,0
+ * dB corrida a corrida, contra los 0,5 dB del barrido). S2 lo sembro por instancia
+ * (render offline determinista, ADR-0008) y el efecto entro al barrido: pasa.
  *
  * 🔴 EL CRITERIO ES CONTRA LA TOLERANCIA DEL BARRIDO, NO CONTRA LA DIFERENCIA
  * ENTRE RATES. Un efecto queda fuera cuando su dispersion corrida-a-corrida es
@@ -113,11 +113,11 @@ std::vector<float> filterIr(int rate, int typeId, float cutoffHz, float q) {
  * pide RESOLVER esa diferencia: pide que el nivel no se mueva mas de 0,5 dB, y
  * eso se contesta con 15,3 sigma de margen. Era un criterio de resolucion
  * aplicado a un test de umbral, y dejaba fuera del catalogo a un efecto que si
- * se podia medir. `RANDOM_RESO` se queda afuera con el mismo criterio nuevo, y
- * el numero es holgado: 16,0 dB contra 0,5.
+ * se podia medir. Con ese criterio `RANDOM_RESO` quedaba afuera (16,0 dB contra
+ * 0,5) hasta que S2 le saco la causa.
  */
 const std::set<std::string>& nonDeterministicLevel() {
-    static const std::set<std::string> kNames = {"RANDOM_RESO"};
+    static const std::set<std::string> kNames = {};
     return kNames;
 }
 

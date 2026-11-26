@@ -105,7 +105,7 @@ public:
     }
 
     watermelon_audio::BackendType getType() const override {
-        return watermelon_audio::BackendType::OBOE;
+        return mType.load(std::memory_order_acquire);
     }
 
     bool supportsFullDuplex() const override { return true; }
@@ -137,6 +137,19 @@ public:
         std::lock_guard<std::mutex> lock(mInfoMutex);
         mInfo.lowLatency = lowLatency ? watermelon_audio::StreamInfo::LowLatency::ON
                                       : watermelon_audio::StreamInfo::LowLatency::OFF;
+    }
+
+    /**
+     * El tipo que este fake dice ser (default OBOE).
+     *
+     * Existe para que un test pueda hacer que `BackendManager::getCurrentType()` sea
+     * LIBUSB en el host: el backend USB real no se puede construir ahi (REQ-054, AC-054.3),
+     * pero el motor solo le pregunta el TIPO al manager. Un fake adoptado como backend USB
+     * (ver `BackendManagerTestAccess` en test_capture_ownership.cpp) y devuelto con este tipo
+     * es el camino "el backend entrega la entrada por callback".
+     */
+    void setType(watermelon_audio::BackendType type) {
+        mType.store(type, std::memory_order_release);
     }
 
     /// Make start() fail, so the manager never reports isRunning().
@@ -213,6 +226,7 @@ private:
     watermelon_audio::IAudioCallback* mCallback = nullptr;
     watermelon_audio::BackendResult mStartResult = watermelon_audio::BackendResult::OK;
     std::atomic<bool> mRunning{false};
+    std::atomic<watermelon_audio::BackendType> mType{watermelon_audio::BackendType::OBOE};
 
     // Freno de start(). mutable no hace falta: sólo lo tocan métodos no-const.
     std::mutex mStartGateMutex;

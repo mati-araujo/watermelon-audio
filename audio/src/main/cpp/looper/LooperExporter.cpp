@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../platform/Logger.h"
@@ -120,7 +121,11 @@ std::vector<float> LooperExporter::resampleStereo(const float* in, int inFrames,
 
 bool LooperExporter::exportMixInternal(const char* filePath, const ExportOptions& opts) {
     if (!filePath) return false;
-    AudioLooper::ExportGuard guard(mL);
+    AudioLooper::ExportGuard guard(mL);   // the operation (isExportInProgress)
+    // A mixdown reads EVERY track: the read scope stays global, but only for the
+    // render. Limiter, resample and the disk write work on mixBuffer and run after
+    // it is released (REQ-055 S4).
+    AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::allTracks());
 
     const ExportSnapshot snap = takeSnapshot();
     if (snap.frames <= 0) return false;
@@ -147,6 +152,7 @@ bool LooperExporter::exportMixInternal(const char* filePath, const ExportOptions
         if (snap.tracks[t].active && !snap.tracks[t].muted) ++activeCount;
     }
     if (activeCount == 0) {
+        reading.release();
         // All tracks muted/inactive — write silence (still useful for count-in tests).
         return wav::writeWav(filePath, mixBuffer.data(), totalFrames,
                              sr, opts.bitDepth, opts.metadata);
@@ -164,6 +170,7 @@ bool LooperExporter::exportMixInternal(const char* filePath, const ExportOptions
                                 static_cast<float>(activeCount));
     }
 
+    reading.release();   // render done: nothing below reads a track buffer
     if (mL.mCancelExport.load(std::memory_order_acquire)) return false;
 
     if (opts.applyLimiter) {
@@ -203,7 +210,11 @@ bool LooperExporter::exportMix(const char* filePath, const ExportOptions& opts) 
 
 int LooperExporter::exportStems(const char* directory, const ExportOptions& opts) {
     if (!directory) return -1;
-    const AudioLooper::ExportGuard guard(mL);
+    const AudioLooper::ExportGuard guard(mL);   // the operation (isExportInProgress)
+    // Stems stay a consistent multi-track snapshot: the read scope is global and
+    // held for the whole loop (each stem is rendered and written in turn). Not
+    // narrowed in REQ-055 S4: buffering every stem first would cost N x the RAM.
+    const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::allTracks());
 
     const ExportSnapshot snap = takeSnapshot();
     if (snap.frames <= 0) return -1;
@@ -273,32 +284,41 @@ bool LooperExporter::exportTrack(int trackIndex, const char* filePath,
     if (trackIndex < 0 || trackIndex >= AudioLooper::MAX_TRACKS) return false;
     if (!mL.mTracks[trackIndex].isActive()) return false;
 
-    const AudioLooper::ExportGuard guard(mL);
-    const TrackBuffer& track = mL.mTracks[trackIndex];
-    int len = track.getLengthFrames();
-    int sr = track.getSampleRate();
+    const AudioLooper::ExportGuard guard(mL);   // the operation (isExportInProgress)
+    // REQ-055 S4: the read scope covers only the COPY to RAM; the (slow) disk write
+    // runs outside it, so the audio thread does not drop capture while it lasts.
+    std::vector<float> dense;
+    int writeLen = 0;
+    int sr = 0;
+    {
+        // Per-track (REQ-055 S4): only this track's capture pauses during the copy.
+        const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::track(trackIndex));
+        const TrackBuffer& track = mL.mTracks[trackIndex];
+        const int len = track.getLengthFrames();
+        sr = track.getSampleRate();
 
-    // If a custom loop region is defined, export only the region.
-    int regionStart = track.getLoopStart();
-    int regionEnd = track.getLoopEnd();
-    int writeStart = 0;
-    int writeLen = len;
-    if (regionStart > 0 || regionEnd < len) {
-        int regionLen = regionEnd - regionStart;
-        if (regionLen > 0) {
-            writeStart = regionStart;
-            writeLen = regionLen;
+        // If a custom loop region is defined, export only the region.
+        const int regionStart = track.getLoopStart();
+        const int regionEnd = track.getLoopEnd();
+        int writeStart = 0;
+        writeLen = len;
+        if (regionStart > 0 || regionEnd < len) {
+            const int regionLen = regionEnd - regionStart;
+            if (regionLen > 0) {
+                writeStart = regionStart;
+                writeLen = regionLen;
+            }
         }
-    }
-    if (writeLen <= 0) return false;
+        if (writeLen <= 0) return false;
 
-    // Materialise a dense copy of the region (storage-agnostic: works for the
-    // paged backend too). IO thread under the guard — the transient copy is fine.
-    std::vector<float> dense(static_cast<size_t>(writeLen) * 2);
-    for (int i = 0; i < writeLen; ++i) {
-        dense[i * 2]     = track.sampleAt(writeStart + i, 0);
-        dense[i * 2 + 1] = track.sampleAt(writeStart + i, 1);
-    }
+        // Materialise a dense copy of the region (storage-agnostic: works for the
+        // paged backend too). IO thread, under the read scope.
+        dense.resize(static_cast<size_t>(writeLen) * 2);
+        for (int i = 0; i < writeLen; ++i) {
+            dense[i * 2]     = track.sampleAt(writeStart + i, 0);
+            dense[i * 2 + 1] = track.sampleAt(writeStart + i, 1);
+        }
+    }  // read scope released: from here on nothing reads the track buffer
     return wav::writeWav(filePath, dense.data(), writeLen, sr,
                          opts.bitDepth, opts.metadata);
 }
@@ -308,18 +328,28 @@ bool LooperExporter::captureTrack(int trackIndex, const char* filePath,
     if (trackIndex < 0 || trackIndex >= AudioLooper::MAX_TRACKS) return false;
     if (!mL.mTracks[trackIndex].isActive()) return false;
 
-    const AudioLooper::ExportGuard guard(mL);
-    const TrackBuffer& track = mL.mTracks[trackIndex];
-    const int len = track.getLengthFrames();
-    const int sr = track.getSampleRate();
-    if (len <= 0) return false;
+    const AudioLooper::ExportGuard guard(mL);   // the operation (isExportInProgress)
+    // REQ-055 S4 (AC-055.2): the read scope covers only the COPY to RAM. The WAV
+    // write runs outside it: NoisyPad saves every take as it closes, and with the
+    // write under the scope the audio thread dropped the start of the next take.
+    std::vector<float> dense;
+    int len = 0;
+    int sr = 0;
+    {
+        // Per-track (REQ-055 S4): only this track's capture pauses during the copy.
+        const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::track(trackIndex));
+        const TrackBuffer& track = mL.mTracks[trackIndex];
+        len = track.getLengthFrames();
+        sr = track.getSampleRate();
+        if (len <= 0) return false;
 
-    // Full-buffer dense copy (storage-agnostic). IO thread under the guard.
-    std::vector<float> dense(static_cast<size_t>(len) * 2);
-    for (int i = 0; i < len; ++i) {
-        dense[i * 2]     = track.sampleAt(i, 0);
-        dense[i * 2 + 1] = track.sampleAt(i, 1);
-    }
+        // Full-buffer dense copy (storage-agnostic). IO thread, under the read scope.
+        dense.resize(static_cast<size_t>(len) * 2);
+        for (int i = 0; i < len; ++i) {
+            dense[i * 2]     = track.sampleAt(i, 0);
+            dense[i * 2 + 1] = track.sampleAt(i, 1);
+        }
+    }  // read scope released: from here on nothing reads the track buffer
     wav::WavMetadata meta;
     return wav::writeWav(filePath, dense.data(), len, sr, bitDepth, meta);
 }
@@ -333,45 +363,14 @@ bool LooperExporter::importTrack(int trackIndex, const char* filePath, int sampl
 }
 
 /**
- * REQ-045 D6 — import that rejects from the HEADER and never destroys the target.
- *
- * What changed, and why the order is the fix:
- *
- *  1. The memory-budget decision is taken from the header alone (frames, rate,
- *     channels), so a 5-minute file over the budget costs one open + a few reads
- *     instead of decoding and resampling ~55 MB first. The size is derived with the
- *     SAME `ceil(numFrames × ratio)` formula the resample below uses — two formulas
- *     would mean the check and the allocation disagree by a frame at some ratio.
- *  2. Everything VALIDABLE is done BEFORE the destination track is touched: argument,
- *     header, representability, budget (of the source decode AND of the reservation),
- *     decode and resample. Before this, `setMuted(true)` + `clear()` ran first and a
- *     failing `allocate()` left the track EMPTY AND MUTED: an out-of-memory import
- *     silently deleted a take.
- *
- *     🔴 **What is NOT closed, and cannot be without the budget the import is enforcing:**
- *     the allocator itself failing when the track reserves, after the decode already
- *     proved the same amount of RAM. Keeping the old take through that needs A and B
- *     alive at once, which is the very peak the budget forbids — and the `clear()` is
- *     also what performs the `waitForRenderIdle()` handshake and returns the chunks. In
- *     that one case the track is left EMPTY, **UNMUTED** and the cause is reported as
- *     `OutOfMemory`. That is the contract (AC-045.8, re-declared after measuring); the
- *     four doc comments on this path say exactly that and nothing wider.
- *  3. writeFrame()'s return is read. It reports a dropped frame (pool exhausted);
- *     ignoring it produced a track that reported the full length with silence in it.
- *  4. **Transient peak.** A rejected import costs O(header). An accepted one peaks at
- *     `source decode (numFrames × 2 × 4) + resample (outputFrames × 2 × 4) + the
- *     track's reservation`, plus the raw payload `readWav` holds while converting. With
- *     a ratio < 1 (192 kHz → 48 kHz) the SOURCE buffer is the big one and the output
- *     says nothing about it, so the source decode is budget-checked on its own — that
- *     was a 430 MB peak sneaking past a 48 MB budget.
+ * Pasos 1-4 de `importTrackChecked` (REQ-045 D6), sin tocar ninguna pista: encabezado, presupuesto,
+ * decodificacion y resampleo a `sampleRate`. Los comparte la cancion programada (clips) para no
+ * tener dos decodificadores. `usedBytes` es lo ya reservado SIN el destino; `reservationBytesFor`
+ * dice cuanto reserva el destino por `frames` (el paginado redondea a chunks de 256 KB).
  */
-ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* filePath,
-                                               int sampleRate) {
-    if (trackIndex < 0 || trackIndex >= mL.getMaxActiveTracks()) {
-        EXP_LOGE("importTrack FAILED: track %d is outside the active-track limit (%d)",
-                 trackIndex, mL.getMaxActiveTracks());
-        return ImportStatus::InvalidTrack;
-    }
+ImportStatus decodeWavToRate(const char* filePath, int sampleRate, size_t budgetBytes,
+                             size_t usedBytes, size_t (*reservationBytesFor)(int),
+                             DecodedStereo& out) {
     // A target rate of 0 or less is the caller's mistake, not a memory problem: it used
     // to fall through the resample arithmetic and come back as OutOfMemory.
     if (sampleRate <= 0) {
@@ -410,9 +409,7 @@ ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* file
 
     // ---- 3. Budget, before decoding. TWO questions, and the second one is not
     // implied by the first.
-    const size_t currentUsage = mL.getTotalReservedBytes();
-    const size_t trackCurrent = mL.mTracks[trackIndex].reservedBytes();
-    const size_t budget = mL.getMemoryBudgetBytes();
+    const size_t budget = budgetBytes;
 
     // (a) the SOURCE decode. With a ratio < 1 the output is smaller than the file, so
     // the reservation below says nothing about the transient: a 192 MB source
@@ -428,10 +425,10 @@ ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* file
     // (b) what the track will RESERVE — computed by the same function the reservation
     // uses, because the paged backend rounds up to whole 256 KB chunks. Using the
     // logical size here let a check pass whose reservation then landed over the budget.
-    const size_t needed = TrackStorage::reservationBytesFor(static_cast<int>(outputFrames64));
-    if (currentUsage - trackCurrent + needed > budget) {
+    const size_t needed = reservationBytesFor(static_cast<int>(outputFrames64));
+    if (usedBytes + needed > budget) {
         EXP_LOGE("importTrack FAILED: memory budget exceeded (need %zu, budget %zu, used %zu)",
-                 needed, budget, currentUsage - trackCurrent);
+                 needed, budget, usedBytes);
         return ImportStatus::BudgetExceeded;
     }
 
@@ -497,7 +494,61 @@ ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* file
         }
     }
 
-    const float* srcBuffer = needsResample ? resampledBuffer.data() : wavData.buffer.data();
+    out.samples = needsResample ? std::move(resampledBuffer) : std::move(wavData.buffer);
+    out.frames = outputFrames;
+    return ImportStatus::Ok;
+}
+
+/**
+ * REQ-045 D6 — import that rejects from the HEADER and never destroys the target.
+ *
+ * What changed, and why the order is the fix:
+ *
+ *  1. The memory-budget decision is taken from the header alone (frames, rate,
+ *     channels), so a 5-minute file over the budget costs one open + a few reads
+ *     instead of decoding and resampling ~55 MB first. The size is derived with the
+ *     SAME `ceil(numFrames × ratio)` formula the resample below uses — two formulas
+ *     would mean the check and the allocation disagree by a frame at some ratio.
+ *  2. Everything VALIDABLE is done BEFORE the destination track is touched: argument,
+ *     header, representability, budget (of the source decode AND of the reservation),
+ *     decode and resample. Before this, `setMuted(true)` + `clear()` ran first and a
+ *     failing `allocate()` left the track EMPTY AND MUTED: an out-of-memory import
+ *     silently deleted a take.
+ *
+ *     🔴 **What is NOT closed, and cannot be without the budget the import is enforcing:**
+ *     the allocator itself failing when the track reserves, after the decode already
+ *     proved the same amount of RAM. Keeping the old take through that needs A and B
+ *     alive at once, which is the very peak the budget forbids — and the `clear()` is
+ *     also what performs the `waitForRenderIdle()` handshake and returns the chunks. In
+ *     that one case the track is left EMPTY, **UNMUTED** and the cause is reported as
+ *     `OutOfMemory`. That is the contract (AC-045.8, re-declared after measuring); the
+ *     four doc comments on this path say exactly that and nothing wider.
+ *  3. writeFrame()'s return is read. It reports a dropped frame (pool exhausted);
+ *     ignoring it produced a track that reported the full length with silence in it.
+ *  4. **Transient peak.** A rejected import costs O(header). An accepted one peaks at
+ *     `source decode (numFrames × 2 × 4) + resample (outputFrames × 2 × 4) + the
+ *     track's reservation`, plus the raw payload `readWav` holds while converting. With
+ *     a ratio < 1 (192 kHz → 48 kHz) the SOURCE buffer is the big one and the output
+ *     says nothing about it, so the source decode is budget-checked on its own — that
+ *     was a 430 MB peak sneaking past a 48 MB budget.
+ */
+ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* filePath,
+                                               int sampleRate) {
+    if (trackIndex < 0 || trackIndex >= mL.getMaxActiveTracks()) {
+        EXP_LOGE("importTrack FAILED: track %d is outside the active-track limit (%d)",
+                 trackIndex, mL.getMaxActiveTracks());
+        return ImportStatus::InvalidTrack;
+    }
+
+    // Pasos 1-4 (REQ-045 D6): nada de esto toca la pista destino.
+    DecodedStereo decoded;
+    const ImportStatus decodeStatus = decodeWavToRate(
+        filePath, sampleRate, mL.getMemoryBudgetBytes(),
+        mL.getTotalReservedBytes() - mL.mTracks[trackIndex].reservedBytes(),
+        &TrackStorage::reservationBytesFor, decoded);
+    if (decodeStatus != ImportStatus::Ok) return decodeStatus;
+    const float* srcBuffer = decoded.samples.data();
+    const int outputFrames = decoded.frames;
 
     // Nothing above this line touched the destination track: a failure so far leaves
     // the previous take playing exactly as it was (AC-045.8).
