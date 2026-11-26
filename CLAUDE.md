@@ -36,7 +36,7 @@ citar** cualquier otro numero; por que, en `docs/dev/conteos-que-envejecen.md`.
 | `jniexport-total` | 381 | JNIEXPORT en todo jni/*.cpp |
 | `wma-api` | 309 | declaraciones WMA_API en la C API |
 | `analysis-files` | 23 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
-| `callers-baseline` | 1 callback-externo / 13 deuda / 3 entrada / 89 sonda-de-tests | reparto del baseline de llamadores |
+| `callers-baseline` | 1 callback-externo / 16 deuda / 3 entrada / 89 sonda-de-tests | reparto del baseline de llamadores |
 | `ver-kotlin` | 2.4.21 | version de Kotlin |
 | `ver-agp` | 9.5.0 | version de AGP |
 <!-- END conteos-medidos -->

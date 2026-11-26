@@ -1,3 +1,6 @@
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+
 plugins {
     id("watermelon.kmp.native")
     `maven-publish`
@@ -23,6 +26,93 @@ android {
         }
     }
 }
+
+// MINI-058 — NOTICE viaja con el binario. Las licencias de lo vendorizado (pffft, libusb,
+// TinySoundFont...) piden reproducir su aviso en lo que acompaña a la distribucion binaria:
+// el AAR y el JAR de desktop lo llevan como recurso, en `META-INF/watermelon-audio/NOTICE`.
+// El directorio propio es a proposito: `META-INF/NOTICE` a secas cae en los excludes por
+// defecto de AGP y desaparece SIN error, en el AAR y en el APK del consumidor. El klib de
+// iOS no lleva recursos. Despues de empaquetar, `NoticeInArchive` abre el AAR y el JAR y
+// falla si el aviso no esta: que el build pase no prueba que viaje.
+// La fuente es UNA: el NOTICE de la raiz, copiado al build.
+abstract class NoticeResources : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val notice: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val dir = outputDir.get().dir("META-INF/watermelon-audio").asFile
+        dir.deleteRecursively()
+        dir.mkdirs()
+        notice.get().asFile.copyTo(dir.resolve("NOTICE"), overwrite = true)
+    }
+}
+
+val rootNotice = rootProject.layout.projectDirectory.file("NOTICE")
+
+androidComponents {
+    onVariants { variant ->
+        val task = tasks.register<NoticeResources>("${variant.name}NoticeResources") {
+            notice.set(rootNotice)
+        }
+        val resources = checkNotNull(variant.sources.resources) {
+            "la variante ${variant.name} no tiene recursos Java: NOTICE no viajaria en el AAR"
+        }
+        resources.addGeneratedSourceDirectory(task, NoticeResources::outputDir)
+    }
+}
+
+val desktopNoticeResources = tasks.register<NoticeResources>("desktopNoticeResources") {
+    notice.set(rootNotice)
+    outputDir.set(layout.buildDirectory.dir("generated/notice/desktop"))
+}
+kotlin.sourceSets.named("desktopMain") {
+    resources.srcDir(desktopNoticeResources.flatMap { it.outputDir })
+}
+
+// Abre el archivo empaquetado (el AAR mira dentro de su classes.jar) y exige la entrada.
+abstract class NoticeInArchive : DefaultTask() {
+    @get:InputFiles
+    abstract val archive: ConfigurableFileCollection
+
+    @get:Input
+    abstract val nestedJar: Property<String>
+
+    @TaskAction
+    fun verify() {
+        val entry = "META-INF/watermelon-audio/NOTICE"
+        val file = archive.singleFile
+        ZipFile(file).use { zip ->
+            val found = if (nestedJar.get().isEmpty()) {
+                zip.getEntry(entry) != null
+            } else {
+                val inner = zip.getEntry(nestedJar.get())
+                    ?: throw GradleException("${file.name} no tiene ${nestedJar.get()}")
+                ZipInputStream(zip.getInputStream(inner)).use { jar ->
+                    generateSequence { jar.nextEntry }.any { it.name == entry }
+                }
+            }
+            if (!found) throw GradleException("${file.name} no lleva $entry (MINI-058)")
+        }
+    }
+}
+
+val verifyReleaseAarNotice = tasks.register<NoticeInArchive>("verifyReleaseAarNotice") {
+    archive.from(tasks.named("bundleReleaseAar"))
+    nestedJar.set("classes.jar")
+}
+val verifyDesktopJarNotice = tasks.register<NoticeInArchive>("verifyDesktopJarNotice") {
+    archive.from(tasks.named("desktopJar"))
+    nestedJar.set("")
+}
+// `named { }` filtra por nombre sin realizar las tasks; los `tasks.named(...)` de arriba
+// corren recien al realizar la verificacion, cuando AGP y KMP ya registraron las suyas.
+tasks.named { it == "assembleRelease" }.configureEach { dependsOn(verifyReleaseAarNotice) }
+tasks.named { it == "desktopJar" }.configureEach { finalizedBy(verifyDesktopJarNotice) }
 
 // Host C++ unit tests (dsp + effects + looper + usb googletest suites).
 // Delegates to the platform wrapper, which locates a host toolchain

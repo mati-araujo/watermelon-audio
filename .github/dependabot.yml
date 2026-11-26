@@ -8,7 +8,7 @@
 #   actions van fijadas por SHA con el tag en comentario; Dependabot actualiza los dos.
 #
 # Lo que Dependabot NO ve (NDK, CMake del SDK, googletest, libusb, TinySoundFont,
-# stb_vorbis, TinyMidiLoader, Xcode) lo cubre el inventario de
+# stb_vorbis, TinyMidiLoader, pffft, Xcode) lo cubre el inventario de
 # audio/src/main/cpp/thirdparty/VENDORED.md, con su procedimiento de CVE.
 #
 # Sintaxis verificada contra la referencia de GitHub

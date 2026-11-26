@@ -112,7 +112,7 @@ camino critico de un PR atestado (`local_first.md` §2).
   corre nada. Una fuente de tests que NO compila para Windows (en el baseline) no frena el diff: se excluyen sus objetos de
   los DOS lados (sus clases no se cuentan en ninguno) y se informa cual; un target de test sin NINGUN objeto vivo es ROJO.
   TYPED_TEST_P (`gtest_suite_<S>_::<N><T>::TestBody()`) se mapea a `S_N_Test`; los nombres se JUNTAN, nunca se parten por
-  `_` (el arbol tiene tests con `_` y ninguna suite con `_`; `Suite_With_Underscores` esta en el self-test). En la Mac no se pudo medir desde la PC Windows: ahi el diff usa `nm` + `c++filt` de Xcode.
+  `_` (el arbol tiene tests con `_` y ninguna suite con `_`; `Suite_With_Underscores` esta en el self-test). En la Mac el diff usa `nm` + `c++filt` de Xcode; se midio el 2026-11-25 (OK: lo unico distinto es lo declarado).
 - `gate-windows.ps1` (REQ-061): el gate LOCAL de la PC Windows (MSYS2 UCRT64), PowerShell 5.1; no atesta, no baja nada y
   no escribe en el árbol: compara por CONTENIDO antes y después (`git status --porcelain=v1 --untracked-files=all`, hash de
   `git diff HEAD --binary` y de cada untracked); la suite escribe en `audio/src/main/cpp/tests/build` (declarado) y en `.../tests/.deps/googletest-build` (no declarable: `.deps` está ignorado entero y preexiste, así que el chequeo no ve lo de adentro). Los untracked se leen como UTF-8 (PS 5.1 usa OEM: un `diseño.md` rompía el snapshot). Tiene `-SelfTest`. Su límite: una escritura dentro de un dir ignorado preexistente no

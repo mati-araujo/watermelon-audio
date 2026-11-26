@@ -459,11 +459,13 @@ def clases_de_demangled(lines):
 
 
 def targets_de_test(build_dir):
-    """Los targets que registran tests con gtest_discover_tests: lo dicen los `<target>[1]_include.cmake`."""
+    """Los targets que registran tests con gtest_discover_tests: lo dicen sus `*_include.cmake`. El nombre depende
+    del CMake: `<target>[1]_include.cmake` en los viejos (el de MSYS2), `<target>_<8 hex>_include.cmake` en 4.x
+    (GoogleTest.cmake: los 8 primeros del SHA256 de los argumentos; el pin de la Mac es 4.4.1)."""
     out = set()
     for _, _, files in os.walk(build_dir):
         for f in files:
-            m = re.fullmatch(r"(.+)\[1\]_include\.cmake", f)
+            m = re.fullmatch(r"(.+)(?:\[1\]|_[0-9a-f]{8})_include\.cmake", f)
             if m:
                 out.add(m.group(1))
     return out
@@ -625,7 +627,7 @@ def registro_gate(build_root, prefix, win_dir, win_by_out, jobs, runner=run, fal
         raise Fatal("el listado declarado tiene errores:\n  " + "\n  ".join(lst.errores))
     t_win = targets_de_test(win_dir)
     if not t_win:
-        raise Fatal(f"no encuentro ningun `*[1]_include.cmake` en {win_dir}: no se que targets registran tests")
+        raise Fatal(f"no encuentro ningun `<target>[1]_include.cmake` ni `<target>_<hash>_include.cmake` en {win_dir}: no se que targets registran tests")
     muertos = targets_sin_objetos(win_by_out, t_win, fallan)
     for t in muertos:
         print(f"  ROJO — {t}: ningun objeto de Windows compila: el target no linkea y no hay registro que comparar")
@@ -864,9 +866,10 @@ def registro_cases():
     if targets_sin_objetos(by_o, {"t", "u"}, set()) != []:
         bad.append("registro: sin fuentes caidas ningun target esta muerto")
     with tempfile.TemporaryDirectory() as tmp:
-        for f in ("core_tests[1]_include.cmake", "x_tests[1]_tests.cmake"):
+        for f in ("core_tests[1]_include.cmake", "x_tests[1]_tests.cmake",
+                  "core_cost_tests_e3b0c442_include.cmake", "y_tests_e3b0c442_tests.cmake", "z_tests_include.cmake"):
             open(os.path.join(tmp, f), "w").close()
-        if targets_de_test(tmp) != {"core_tests"}:
+        if targets_de_test(tmp) != {"core_tests", "core_cost_tests"}:
             bad.append(f"registro: targets_de_test: {targets_de_test(tmp)}")
     by_out = {"t/CMakeFiles/t.dir/a.cpp.obj": "x/a.cpp", "gtest/CMakeFiles/gtest.dir/g.cc.obj": "g.cc"}
     fake = lambda cmd, log=None, **kw: types.SimpleNamespace(returncode=0, stdout="0000 T _ZN8A_B_Test8TestBodyEv\n")
