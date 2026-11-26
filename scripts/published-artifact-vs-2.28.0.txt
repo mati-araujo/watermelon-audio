@@ -1,0 +1,46 @@
+# Diferencias DECLARADAS del artefacto publicado contra 2.28.0 del registro.
+#
+#   ./gradlew :audio:publishToMavenLocal -Pversion=2.28.0-local
+#   GPR_KEY=... python3 scripts/diff-published-artifact.py --against 2.28.0 \
+#       --local-version 2.28.0-local \
+#       --expect-file scripts/published-artifact-vs-2.28.0.txt
+#
+# Reemplaza a published-artifact-vs-2.21.0.txt como base del trinquete: contra 2.21.0
+# quedaban 108 diferencias sin declarar de etapas que no lo re-declararon (desktop,
+# API nueva, bumps), y esa base ya no aislaba lo que agrega un cambio. Ese archivo
+# queda como historia de REQ-047; el trinquete vivo es este.
+#
+# Forma: CLAVE = VALOR_BASE -> VALOR_HEAD   # razon
+# Es un TRINQUETE SOBRE EL VALOR: una diferencia que no esta aca es roja, una que
+# esta con OTRO valor tambien, y una linea que no se reproduce tambien. Cada cambio
+# que toca lo publicado re-declara las suyas con `--print-declarations`; SU DIFF ES
+# LA REVISION. Los bytes de libwatermelon_audio.so se imprimen y no se declaran
+# (REQ-047 S2, R5); aar/size entra solo si sale del 5 % (medido: +0,19 %).
+#
+# Medido sobre master d34b90b publicado como 2.28.0-local (2026-11-26).
+
+# --- MINI-058 (#429): NOTICE de lo vendorizado (pffft) viaja en el classes.jar. Su hash es
+# el del NOTICE de la raiz con LF; cada cambio de NOTICE lo re-declara.
+aar/jar-entry:classes.jar!META-INF/watermelon-audio/NOTICE = (ausente) -> sha256:87a1a48665ec0785   # MINI-058: las licencias de lo vendorizado piden reproducir su aviso con el binario
+
+# --- #420 (9c43655, bump del grupo gradle): Kotlin 2.4.20 -> 2.4.21 y Gradle 9.7.1 -> 9.8.1.
+# La stdlib que piden los POM y los .module sigue a la version del compilador.
+module:audio-android/createdBy.gradle = 9.7.1 -> 9.8.1   # #420: wrapper de Gradle 9.7.1 -> 9.8.1
+module:audio-desktop/createdBy.gradle = 9.7.1 -> 9.8.1   # #420: wrapper de Gradle 9.7.1 -> 9.8.1
+module:audio-iosarm64/createdBy.gradle = 9.7.1 -> 9.8.1   # #420: wrapper de Gradle 9.7.1 -> 9.8.1
+module:audio-iossimulatorarm64/createdBy.gradle = 9.7.1 -> 9.8.1   # #420: wrapper de Gradle 9.7.1 -> 9.8.1
+module:audio/createdBy.gradle = 9.7.1 -> 9.8.1   # #420: wrapper de Gradle 9.7.1 -> 9.8.1
+module:audio-android/variant:releaseApiElements-published/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[] -> version[requires=2.4.21] excl[]   # #420: Kotlin 2.4.20 -> 2.4.21
+module:audio-android/variant:releaseRuntimeElements-published/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common] -> version[requires=2.4.21] excl[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common]   # #420: Kotlin 2.4.20 -> 2.4.21
+module:audio-desktop/variant:desktopApiElements-published/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[] -> version[requires=2.4.21] excl[]   # #420: Kotlin 2.4.20 -> 2.4.21
+module:audio-desktop/variant:desktopRuntimeElements-published/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[] -> version[requires=2.4.21] excl[]   # #420: Kotlin 2.4.20 -> 2.4.21
+module:audio-iosarm64/variant:iosArm64ApiElements-published/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[] -> version[requires=2.4.21] excl[]   # #420: Kotlin 2.4.20 -> 2.4.21
+module:audio-iosarm64/variant:iosArm64MetadataElements-published/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[] -> version[requires=2.4.21] excl[]   # #420: Kotlin 2.4.20 -> 2.4.21
+module:audio-iossimulatorarm64/variant:iosSimulatorArm64ApiElements-published/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[] -> version[requires=2.4.21] excl[]   # #420: Kotlin 2.4.20 -> 2.4.21
+module:audio-iossimulatorarm64/variant:iosSimulatorArm64MetadataElements-published/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[] -> version[requires=2.4.21] excl[]   # #420: Kotlin 2.4.20 -> 2.4.21
+module:audio/variant:metadataApiElements/dep:org.jetbrains.kotlin:kotlin-stdlib = version[requires=2.4.20] excl[] -> version[requires=2.4.21] excl[]   # #420: Kotlin 2.4.20 -> 2.4.21
+pom:audio-android/dep:org.jetbrains.kotlin:kotlin-stdlib = 2.4.20 scope=compile type=jar optional=false excl=[] -> 2.4.21 scope=compile type=jar optional=false excl=[]   # #420: Kotlin 2.4.20 -> 2.4.21
+pom:audio-desktop/dep:org.jetbrains.kotlin:kotlin-stdlib = 2.4.20 scope=compile type=jar optional=false excl=[] -> 2.4.21 scope=compile type=jar optional=false excl=[]   # #420: Kotlin 2.4.20 -> 2.4.21
+pom:audio-iosarm64/dep:org.jetbrains.kotlin:kotlin-stdlib = 2.4.20 scope=compile type=jar optional=false excl=[] -> 2.4.21 scope=compile type=jar optional=false excl=[]   # #420: Kotlin 2.4.20 -> 2.4.21
+pom:audio-iossimulatorarm64/dep:org.jetbrains.kotlin:kotlin-stdlib = 2.4.20 scope=compile type=jar optional=false excl=[] -> 2.4.21 scope=compile type=jar optional=false excl=[]   # #420: Kotlin 2.4.20 -> 2.4.21
+pom:audio/dep:org.jetbrains.kotlin:kotlin-stdlib = 2.4.20 scope=runtime type=jar optional=false excl=[] -> 2.4.21 scope=runtime type=jar optional=false excl=[]   # #420: Kotlin 2.4.20 -> 2.4.21

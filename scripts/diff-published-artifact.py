@@ -15,12 +15,12 @@ version ya publicada en GitHub Packages, HECHO POR HECHO, y exige que cada
 diferencia este DECLARADA CON SU VALOR. Lo usan S2, S3 y el cierre de REQ-047.
 
     python3 scripts/diff-published-artifact.py --self-test
-    ./gradlew :audio:publishToMavenLocal -Pversion=2.21.0-local
+    ./gradlew :audio:publishToMavenLocal -Pversion=2.28.0-local
     GPR_KEY=... python3 scripts/diff-published-artifact.py \\
-        --against 2.21.0 --local-version 2.21.0-local \\
-        --expect-file scripts/published-artifact-vs-2.21.0.txt
+        --against 2.28.0 --local-version 2.28.0-local \\
+        --expect-file scripts/published-artifact-vs-2.28.0.txt
     # para (re)declarar: imprime lo observado en la sintaxis del archivo
-    python3 scripts/diff-published-artifact.py --against 2.21.0 ... --print-declarations
+    python3 scripts/diff-published-artifact.py --against 2.28.0 ... --print-declarations
 
 QUE COMPARA
 -----------
