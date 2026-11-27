@@ -1,0 +1,34 @@
+# REQ-048 S2 (tarea 2.2d) — el control positivo del decoder de SF3, que corre en el CI.
+#
+# Un Ogg Vorbis LEGITIMO, versionado con su receta (decision del humano, 27/11). Lo usa
+# test_hostile_corpus.cpp (Sf3DecoderControl): lo envuelve en un .sf3 minimo, lo carga por
+# tsf_load_memory y compara lo decodificado contra la senoide regenerada en el test, por SNR y por
+# largo. No por hash: el PCM de stb_vorbis puede diferir en el ultimo bit entre la libm (y el FMA)
+# de macOS y la de Linux. Sin este archivo, el corpus hostil pasa con un decoder que rechaza TODO
+# Ogg, y la unica prueba que decodifica Vorbis de verdad (la linea de base de GeneralUser) sale
+# SKIPPED en el CI.
+#
+# archivo     sha256                                                            bytes
+sine441.ogg   69fe44a0a2e14820f1188f5ed9edc366b4551fc0ca6e16ece2295c4e71a7f2eb  4969
+#
+# Receta (ffmpeg 9.0.1, Homebrew, macOS arm64; dos corridas, mismo sha256):
+#
+#   ffmpeg -f lavfi \
+#     -i "aevalsrc=0.5*sin(2*PI*441*t)|0.5*sin(2*PI*441*t):s=44100:d=0.25:c=stereo" \
+#     -strict -2 -c:a vorbis -fflags +bitexact -flags:a +bitexact -map_metadata -1 sine441.ogg
+#
+# - La senoide: 441 Hz a amplitud 0,5, 44100 Hz, 0,25 s = 11025 frames. tsf decodifica solo el
+#   primer canal (tsf_decode_ogg), y los dos son iguales.
+# - Estereo escrito en aevalsrc y no con `-ac 2`: el encoder nativo de ffmpeg solo acepta estereo, y
+#   el upmix de ffmpeg pone la mono a -3 dB por canal (medido: pico 0,358 y 10,6 dB de "SNR" contra
+#   la senoide, que es pura ganancia).
+# - 4969 bytes, IMPAR a proposito: en el .sf3 va tal cual, con su byte de relleno RIFF, que es el
+#   caso real de 2.2c (el .sf3 legitimo de MINI-038 que tsf rechazaba). Otro ffmpeg puede dar otros
+#   bytes y otro largo (libvorbis y el nativo difieren): si se regenera, re-medir lo de abajo.
+#
+# Medido el 27/11 (tsf.h de S2 + el stb_vorbis del fork, Apple clang 21, ASan+UBSan):
+# - 3 paginas; el granule de la ultima es 11072 (el encoder redondea el largo a 64). tsf decodifica
+#   11072 frames, y la region cierra en 11073 (tsf cierra toda region en `end + 1`).
+# - SNR de los primeros 11025 frames contra la senoide: 44,5 dB (por octavos, de 40,4 dB en el
+#   ultimo, donde la senoide se corta, a 48,0 dB). El test pide 35 dB: un corrimiento de una muestra
+#   da 24 dB, la mono a -3 dB 10,6, el silencio 0.
