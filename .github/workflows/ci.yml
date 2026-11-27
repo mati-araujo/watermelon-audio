@@ -598,7 +598,7 @@ jobs:
 
       - name: Set up JDK 17
         if: steps.attest.outputs.valid != 'true'
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: 17
@@ -649,7 +649,7 @@ jobs:
 
       - name: Set up Gradle
         if: steps.attest.outputs.valid != 'true'
-        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       # Since WA-3.1 these also run cinterop, which re-invokes build-ios.sh through
       # the buildIosNativeLib task. That is not wasted work: the CMake tree from the
@@ -768,7 +768,7 @@ jobs:
 
       - name: Set up JDK 17
         if: steps.attest.outputs.valid != 'true'
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: 17
@@ -804,7 +804,7 @@ jobs:
 
       - name: Set up Gradle
         if: steps.attest.outputs.valid != 'true'
-        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       # WA-5.5 — la UI del harness no puede entrar al artefacto publicado.
       # Corre aca y no en el job de macOS porque solo necesita que Gradle
