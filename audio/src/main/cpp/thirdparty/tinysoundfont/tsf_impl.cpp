@@ -82,6 +82,21 @@ extern "C" int tsf_ext_region_filter(const tsf* f, int presetIndex, int regionIn
     return 1;
 }
 
+extern "C" int tsf_ext_region_samples(const tsf* f, int presetIndex, int regionIndex, const float** samples,
+                                      unsigned int* offset, unsigned int* end, unsigned int* loopStart,
+                                      unsigned int* loopEnd) {
+    if (!f || presetIndex < 0 || presetIndex >= f->presetNum) return 0;
+    const struct tsf_preset& p = f->presets[presetIndex];
+    if (!p.regions || regionIndex < 0 || regionIndex >= p.regionNum) return 0;
+    const struct tsf_region& r = p.regions[regionIndex];
+    if (samples) *samples = f->fontSamples;
+    if (offset) *offset = r.offset;
+    if (end) *end = r.end;
+    if (loopStart) *loopStart = r.loop_start;
+    if (loopEnd) *loopEnd = r.loop_end;
+    return 1;
+}
+
 // ---- REQ-039 S2: las voces que un note-on acaba de arrancar --------------------
 //
 // tsf no guarda "las voces de la ultima llamada": las identifica el `playIndex`,

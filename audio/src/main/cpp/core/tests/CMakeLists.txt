@@ -175,6 +175,8 @@ add_executable(core_tests
     test_minimal_soundfont_modulators.cpp
     test_soundfont_note_on.cpp
     test_soundfont_default_two_identity.cpp
+    test_sf3_decode_baseline.cpp
+    test_hostile_corpus.cpp
     test_soundfont_fine_tune_keytrack.cpp
     test_soundfont_envelopes.cpp
     test_soundfont_note_on_destinations.cpp
@@ -221,6 +223,10 @@ target_compile_definitions(core_tests PRIVATE
     # MINI-028 — el font real, en el bundle de NoisyPad (checkout hermano). Misma
     # regla que en engines/tests: sin el, SKIPPED y nunca passed.
     WMA_GENERALUSER_SF3_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../../NoisyPad/core-soundfont-bundle/src/main/assets/soundfonts/GeneralUser_GS.sf3"
+    # REQ-048 S1 (AC-048.4) — el PCM de GeneralUser tras la carga, tomado con stb_vorbis 1.22.
+    WMA_SF3_PCM_BASELINE="${CMAKE_CURRENT_SOURCE_DIR}/testdata/sf3-pcm-baseline/GeneralUser_GS.tsv"
+    # REQ-048 S1 (AC-048.1) — el corpus hostil versionado (artefactos del fuzzer de S0).
+    WMA_HOSTILE_TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata/hostile"
     # REQ-043 — los fixtures versionados del looper (glide-voz.*), de solo lectura, para el
     # test que entra por la C API. Mismo directorio que usa looper/tests.
     WMA_LOOPER_TESTDATA_DIR="${WMA_CPP_ROOT}/looper/tests/testdata")

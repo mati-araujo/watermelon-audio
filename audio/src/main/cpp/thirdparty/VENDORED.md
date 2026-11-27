@@ -31,18 +31,21 @@ son nuestros (como se compila / extensiones), no parte de lo vendorizado.
 | Abierto | upstream issue #123 (heap over-read por indices del hydra SF2 en `tsf_load_presets`, abierto hoy): lo cubre REQ-048 (validacion del hydra en `tsf_load`) |
 | CVEs | `curl -s 'https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=TinySoundFont'` da 0 hoy; la fuente real son los issues: `gh api 'repos/schellingb/TinySoundFont/issues?state=open'` |
 
-## stb_vorbis (`tinysoundfont/stb_vorbis.c`)
+## stb_vorbis (`tinysoundfont/stb_vorbis.c`) — FORK de SDL_mixer
 
 | | |
 |---|---|
-| Version | 1.22 |
-| Upstream | https://github.com/nothings/stb |
-| Commit | `1ee679ca2ef753a528db5ba6801e1067b40481b8` (2021-07-12, "update version numbers"), el ultimo que toco el archivo (`gh api 'repos/nothings/stb/commits?path=stb_vorbis.c&per_page=1'`) |
-| Como se verifico | `curl .../stb/1ee679c.../stb_vorbis.c` + `diff --strip-trailing-cr` contra el local |
-| Modificado localmente | ninguno, byte a byte igual al commit |
-| CVEs abiertos sin fix upstream | los 12 existen en NVD (`curl -s 'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<id>'`) y afectan a stb_vorbis <= 1.22: CVE-2023-45675..45682, CVE-2023-47212, CVE-2026-5316 (`setup_free`), CVE-2026-5317 (`start_decoder`), CVE-2026-89266 (`start_decoder`, truncado size_t a int; NVD lo marca `Deferred`) |
+| Version | 1.22 + los arreglos del linaje de SDL_mixer (el archivo sigue diciendo `v1.22`) |
+| Upstream | https://github.com/libsdl-org/SDL_mixer, `src/stb_vorbis/stb_vorbis.h` (fork mantenido de https://github.com/nothings/stb, que no cambia `stb_vorbis.c` desde 2021) |
+| Commit | `df66ae893c91b0f6fa5d026a195bb278213d007d` (HEAD de `main` el 2026-09-29). Ultimos commits que tocan el archivo: `01a5783` (2026-07-13, `inverse_db_table`) y `52afb20` (2026-06-05, `setup_malloc` a uint64) |
+| Como se verifico | `curl -sSfL https://raw.githubusercontent.com/libsdl-org/SDL_mixer/df66ae8.../src/stb_vorbis/stb_vorbis.h` da sha256 `e66e2922bad7679e4f714129f978e56b8bd19840b4ac2d7807e74c90e724670a`, igual al archivo de `e17144f`; desde ahi, `git diff e17144f -- <ruta>` muestra solo los parches propios de abajo |
+| Modificado localmente | **1 parche** (REQ-048 S1), comentado en el codigo con `watermelon-audio (REQ-048)`: `lookup1_values` compara `pow(r+1, dim)` en punto flotante sin el cast `(int)` (con `dim` grande da `inf` y el cast era UB; el resultado no cambia donde estaba definido, verificado por fuerza bruta en la revision de S1) y suma una guarda defensiva `entries <= 0 \|\| dim <= 0`; se quita el `STB_NO_SANITIZE("float-cast-overflow")` con que el fork lo silenciaba (upstream nothings/stb#1168). Lo cubre la firma F5 del corpus hostil |
+| Entro por | REQ-048 S1: `e17144f` (el fork tal cual) y el parche (`git log --oneline -- <ruta>`: `chore(sf): lookup1_values rechaza el codebook…`). Antes: nothings/stb `1ee679ca2ef753a528db5ba6801e1067b40481b8` (1.22, 2021-07-12), byte a byte |
+| Uso | `tsf_impl.cpp` lo incluye con `STB_VORBIS_NO_STDIO`; lo propio de SDL (`SDL_IOStream`, `SDL_ReadIO`) esta detras de `STB_VORBIS_SDL`, que no se define. tsf solo llama `stb_vorbis_open_memory`, `stb_vorbis_get_frame_float` y `stb_vorbis_close` |
+| CVEs de 1.22 que cierra | con reproductor del fuzzer (corpus `core/tests/testdata/hostile/`, F1-F5): CVE-2023-45675/45676/45677, CVE-2023-45681 (stb#2005), CVE-2023-47212, CVE-2026-89266 (su clase), CVE-2023-45680. **Por el diff del fork, sin reproductor** (decision del lider, 2026-09-29): CVE-2023-45678 (`submap_*[16]`; escritura intra-objeto, ASan no la ve), CVE-2023-45679 (guardas en deinit), CVE-2023-45682 (`valid_bits < 0`), stb#1934 (`inverse_db_table[ly&255]`), stb#1949 (`lookup_values`/`multiplicands` en uint64), CVE-2026-5316/5317 (sin detalle publico: la correspondencia con #1934/#1949 no esta verificada). Fuera de nuestro camino: stb#1925 (`seek_to_sample_coarse`; tsf no hace seek) |
+| CVEs | NVD por id (`curl -s 'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<id>'`) para los de arriba, y `keywordSearch=stb_vorbis` para los nuevos; un CVE nuevo contra stb_vorbis <= 1.22 se revisa contra el `git log` del archivo en SDL_mixer |
 | Alcanzables | el consumidor (NoisyPad) importa y descarga `.sf3` (SoundFont con muestras Vorbis) |
-| Plan | REQ-048 lo reemplaza por el fork de SDL_mixer (commit `df66ae8`) con parches propios: **esta fila se reescribe ahi y los parches se listan aca (AC-048.2)** |
+| Pendiente | REQ-048 S2: tsf le pasa a stb `shdr->end` sin acotar a `smpl` (firma F6: se ve como un over-read de stb, pero la causa es tsf). El fork no puede cerrarlo |
 
 🔴 OSV **no conoce** CVE-2026-5316, CVE-2026-5317 ni CVE-2026-89266 (`/v1/vulns/<id>` devuelve 404); los 9 de 2023 si. Para stb_vorbis, NVD es la fuente, OSV sola da un falso limpio.
 

@@ -44,6 +44,17 @@ int tsf_ext_preset_region_count(const tsf* f, int presetIndex);
 int tsf_ext_region_filter(const tsf* f, int presetIndex, int regionIndex, int* initialFilterFc,
                           int* modEnvToFilterFc, int* modLfoToFilterFc);
 
+// ---- REQ-048 S1: el PCM decodificado de una region, para MEDIR -----------------
+//
+// AC-048.4 pide que cambiar el decoder de SF3 (stb_vorbis) no cambie las muestras de los
+// fonts legitimos, o que la diferencia se mida. Eso se afirma sobre lo que tsf deja en
+// `fontSamples` despues de `tsf_load_*`, no sobre un render (que mezcla envolventes y filtro).
+// Thread de control, solo lectura. Devuelve 1 y escribe los cinco (los indices son en
+// muestras dentro de `*samples`), o 0 sin tocar nada si el preset o la region no existen.
+int tsf_ext_region_samples(const tsf* f, int presetIndex, int regionIndex, const float** samples,
+                           unsigned int* offset, unsigned int* end, unsigned int* loopStart,
+                           unsigned int* loopEnd);
+
 // ---- REQ-039 S2: las voces que un note-on acaba de arrancar --------------------
 //
 // `tsf_note_on` calcula por voz la ganancia de velocity (`tsf.h:1619`, cableada
