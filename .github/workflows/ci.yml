@@ -381,7 +381,10 @@ jobs:
             install -y $need
       - name: Build & run C++ test suite (ASan+UBSan)
         env:
-          SANITIZE: address,undefined
+          # float-cast-overflow va aparte: en GCC `undefined` NO lo incluye (en clang si), y es la
+          # firma de F5 del corpus hostil (REQ-048 S1, `lookup1_values` de stb_vorbis). Sin el,
+          # revertir el parche propio da este job verde.
+          SANITIZE: address,undefined,float-cast-overflow
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: bash scripts/run-cpp-tests.sh
