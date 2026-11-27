@@ -355,13 +355,18 @@ struct tsf
 	int* refCount;
 };
 
+// watermelon-audio (REQ-048 S2, F11 de S0): los callbacks de stream reciben `void*` y castean
+// adentro. Antes eran `FILE*`/`tsf_stream_memory*` y se guardaban en `tsf_stream` con un cast de
+// puntero a funcion: llamar a una funcion por un puntero de otro tipo es UB ([expr.call]/6,
+// C11 6.3.2.3p8), y clang >= 17 lo reporta con -fsanitize=function en CADA carga (tsf.h:520), lo
+// que tapaba todo lo demas al fuzzear. Sin casts, el compilador verifica las firmas.
 #ifndef TSF_NO_STDIO
-static int tsf_stream_stdio_read(FILE* f, void* ptr, unsigned int size) { return (int)fread(ptr, 1, size, f); }
-static int tsf_stream_stdio_skip(FILE* f, unsigned int count) { return !fseek(f, count, SEEK_CUR); }
+static int tsf_stream_stdio_read(void* f, void* ptr, unsigned int size) { return (int)fread(ptr, 1, size, (FILE*)f); }
+static int tsf_stream_stdio_skip(void* f, unsigned int count) { return !fseek((FILE*)f, count, SEEK_CUR); }
 TSFDEF tsf* tsf_load_filename(const char* filename)
 {
 	tsf* res;
-	struct tsf_stream stream = { TSF_NULL, (int(*)(void*,void*,unsigned int))&tsf_stream_stdio_read, (int(*)(void*,unsigned int))&tsf_stream_stdio_skip };
+	struct tsf_stream stream = { TSF_NULL, &tsf_stream_stdio_read, &tsf_stream_stdio_skip };
 	#if __STDC_WANT_SECURE_LIB__
 	FILE* f = TSF_NULL; fopen_s(&f, filename, "rb");
 	#else
@@ -380,11 +385,11 @@ TSFDEF tsf* tsf_load_filename(const char* filename)
 #endif
 
 struct tsf_stream_memory { const char* buffer; unsigned int total, pos; };
-static int tsf_stream_memory_read(struct tsf_stream_memory* m, void* ptr, unsigned int size) { if (size > m->total - m->pos) size = m->total - m->pos; TSF_MEMCPY(ptr, m->buffer+m->pos, size); m->pos += size; return size; }
-static int tsf_stream_memory_skip(struct tsf_stream_memory* m, unsigned int count) { if (m->pos + count > m->total) return 0; m->pos += count; return 1; }
+static int tsf_stream_memory_read(void* data, void* ptr, unsigned int size) { struct tsf_stream_memory* m = (struct tsf_stream_memory*)data; if (size > m->total - m->pos) size = m->total - m->pos; TSF_MEMCPY(ptr, m->buffer+m->pos, size); m->pos += size; return size; }
+static int tsf_stream_memory_skip(void* data, unsigned int count) { struct tsf_stream_memory* m = (struct tsf_stream_memory*)data; if (m->pos + count > m->total) return 0; m->pos += count; return 1; }
 TSFDEF tsf* tsf_load_memory(const void* buffer, int size)
 {
-	struct tsf_stream stream = { TSF_NULL, (int(*)(void*,void*,unsigned int))&tsf_stream_memory_read, (int(*)(void*,unsigned int))&tsf_stream_memory_skip };
+	struct tsf_stream stream = { TSF_NULL, &tsf_stream_memory_read, &tsf_stream_memory_skip };
 	struct tsf_stream_memory f = { 0, 0, 0 };
 	f.buffer = (const char*)buffer;
 	f.total = size;
@@ -427,7 +432,9 @@ static void tsf_hydra_read_igen(struct tsf_hydra_igen* i, struct tsf_stream* str
 static void tsf_hydra_read_shdr(struct tsf_hydra_shdr* i, struct tsf_stream* stream) { TSFR(sampleName) TSFR(start) TSFR(end) TSFR(startLoop) TSFR(endLoop) TSFR(sampleRate) TSFR(originalPitch) TSFR(pitchCorrection) TSFR(sampleLink) TSFR(sampleType) }
 #undef TSFR
 
-struct tsf_riffchunk { tsf_fourcc id; tsf_u32 size; };
+// watermelon-audio (REQ-048 S2, 2.2c): `padPending` = el ultimo hijo leido de este chunk tenia largo
+// impar y puede venir su byte de relleno (ver tsf_riffchunk_read).
+struct tsf_riffchunk { tsf_fourcc id; tsf_u32 size; tsf_u8 padPending; };
 struct tsf_envelope { float delay, attack, hold, decay, sustain, release, keynumToHold, keynumToDecay; };
 struct tsf_voice_envelope { unsigned char segment, segmentIsExponential : 1, isAmpEnv : 1; short midiVelocity; float level, slope; int samplesUntilNextSegment; struct tsf_envelope parameters; };
 // watermelon-audio (REQ-041 S1): `gain` es el termino de nivel de la voz que el filtro aporta,
@@ -513,14 +520,31 @@ static float tsf_cents2Hertz(float cents) { return 8.176f * TSF_POWF(2.0f, cents
 static float tsf_decibelsToGain(float db) { return (db > -100.f ? TSF_POWF(10.0f, db * 0.05f) : 0); }
 static float tsf_gainToDecibels(float gain) { return (gain <= .00001f ? -100.f : (float)(20.0 * TSF_LOG10(gain))); }
 
+// watermelon-audio (REQ-048 S2, tarea 2.2c): RIFF rellena con un byte en cero un chunk de largo
+// impar; el largo del chunk no lo cuenta y el del padre si. tsf no lo saltaba: tras un chunk impar
+// el encabezado siguiente se leia corrido un byte, se daba por invalido y la carga terminaba sin
+// `pdta`. Un .sf3 LEGITIMO cuya muestra Ogg mide un numero impar de bytes se rechazaba (hallazgo de
+// MINI-038; medido en REQ-048 S1: es la paridad, no stb_vorbis). El relleno se consume al leer el
+// hermano siguiente, mirando ese byte: si es 0 es el relleno, y si no es el primer byte del id que
+// sigue (ningun id valido empieza en 0, ver abajo), porque hay escritores que no rellenan y tsf hoy
+// los carga. Si el padre ya no tiene bytes, no hay relleno que leer.
 static TSF_BOOL tsf_riffchunk_read(struct tsf_riffchunk* parent, struct tsf_riffchunk* chunk, struct tsf_stream* stream)
 {
 	TSF_BOOL IsRiff, IsList;
+	unsigned int idRead = 0;
+	chunk->padPending = 0;
+	if (parent && parent->padPending && parent->size > 0)
+	{
+		if (!stream->read(stream->data, &chunk->id[0], 1)) return TSF_FALSE;
+		if (chunk->id[0] == 0) parent->size--; // el relleno
+		else idRead = 1;                         // escritor sin relleno: es el id del hermano
+	}
+	if (parent) parent->padPending = 0;
 	if (parent && sizeof(tsf_fourcc) + sizeof(tsf_u32) > parent->size) return TSF_FALSE;
-	if (!stream->read(stream->data, &chunk->id, sizeof(tsf_fourcc)) || *chunk->id <= ' ' || *chunk->id >= 'z') return TSF_FALSE;
+	if (!stream->read(stream->data, &chunk->id[idRead], sizeof(tsf_fourcc) - idRead) || *chunk->id <= ' ' || *chunk->id >= 'z') return TSF_FALSE;
 	if (!stream->read(stream->data, &chunk->size, sizeof(tsf_u32))) return TSF_FALSE;
 	if (parent && sizeof(tsf_fourcc) + sizeof(tsf_u32) + chunk->size > parent->size) return TSF_FALSE;
-	if (parent) parent->size -= sizeof(tsf_fourcc) + sizeof(tsf_u32) + chunk->size;
+	if (parent) parent->size -= sizeof(tsf_fourcc) + sizeof(tsf_u32) + chunk->size, parent->padPending = (tsf_u8)(chunk->size & 1);
 	IsRiff = TSF_FourCCEquals(chunk->id, "RIFF"), IsList = TSF_FourCCEquals(chunk->id, "LIST");
 	if (IsRiff && parent) return TSF_FALSE; //not allowed
 	if (!IsRiff && !IsList) return TSF_TRUE; //custom type without sub type
@@ -750,6 +774,51 @@ static void tsf_region_envtosecs(struct tsf_envelope* p, TSF_BOOL sustainIsGain)
 	else p->sustain = 1.0f - (p->sustain / 1000.0f);
 }
 
+// watermelon-audio (REQ-048 S2, AC-048.3; F9/F10 de S0, TinySoundFont #123). `tsf_load_presets`
+// recorre phdr -> pbag -> pgen -> inst -> ibag -> igen -> shdr con indices del archivo: cierra
+// cada rango con el registro i+1 (de phdr, pbag, inst e ibag), itera con `!=` (un rango que
+// retrocede no termina) y no acotaba ninguno contra su tabla. Un font hostil leia fuera del heap
+// (HBO, BUS y, si el indice caia en lo que stb ya habia liberado, UAF). Se valida ANTES de
+// recorrer, y solo lo que el recorrido alcanza: cada tabla hasta el registro que cierra la ultima
+// zona de su padre. Lo que esta fuera de ese tramo nunca se lee y no rechaza el font.
+// Un indice fuera de rango devuelve NULL, como un RIFF roto. Los instrumentos fuera de rango NO
+// rechazan: `tsf_load_presets` ya los salteaba y el lector de moduladores (que replica su
+// recorrido) tambien; ver alli el limite, que ahora excluye al terminal EOI.
+static int tsf_hydra_valid(const struct tsf_hydra* hydra)
+{
+	enum { GenSampleID = 53 };
+	int i, pbagEnd, pgenEnd, ibagEnd, igenEnd;
+
+	// Los terminales EOP y EOI se leen abajo (SF2 7.2 y 7.6). Con las demas tablas vacias, el tope
+	// de cada tramo (`pbagEnd >= pbagNum`, ...) ya rechaza o no hay nada que leer.
+	if (hydra->phdrNum < 1 || hydra->instNum < 1) return 0;
+
+	// phdr -> pbag: cada preset es [presetBagNdx(i), presetBagNdx(i+1)), y el terminal EOP lo cierra.
+	for (i = 0; i + 1 < hydra->phdrNum; i++) if (hydra->phdrs[i].presetBagNdx > hydra->phdrs[i + 1].presetBagNdx) return 0;
+	pbagEnd = hydra->phdrs[hydra->phdrNum - 1].presetBagNdx;
+	if (pbagEnd >= hydra->pbagNum) return 0;
+
+	// pbag -> pgen: los bags [0, pbagEnd) y el pbagEnd que cierra el ultimo.
+	for (i = 0; i < pbagEnd; i++) if (hydra->pbags[i].genNdx > hydra->pbags[i + 1].genNdx) return 0;
+	pgenEnd = hydra->pbags[pbagEnd].genNdx;
+	if (pgenEnd > hydra->pgenNum) return 0;
+
+	// inst -> ibag: cualquier instrumento puede ser alcanzado, y el terminal EOI cierra el ultimo.
+	for (i = 0; i + 1 < hydra->instNum; i++) if (hydra->insts[i].instBagNdx > hydra->insts[i + 1].instBagNdx) return 0;
+	ibagEnd = hydra->insts[hydra->instNum - 1].instBagNdx;
+	if (ibagEnd >= hydra->ibagNum) return 0;
+
+	// ibag -> igen
+	for (i = 0; i < ibagEnd; i++) if (hydra->ibags[i].instGenNdx > hydra->ibags[i + 1].instGenNdx) return 0;
+	igenEnd = hydra->ibags[ibagEnd].instGenNdx;
+	if (igenEnd > hydra->igenNum) return 0;
+
+	// igen -> shdr: el terminal EOS no es una muestra.
+	for (i = 0; i < igenEnd; i++)
+		if (hydra->igens[i].genOper == GenSampleID && hydra->igens[i].genAmount.wordAmount >= hydra->shdrNum - 1) return 0;
+	return 1;
+}
+
 static int tsf_load_presets(tsf* res, struct tsf_hydra *hydra, unsigned int fontSampleCount)
 {
 	enum { GenInstrument = 41, GenKeyRange = 43, GenVelRange = 44, GenSampleID = 53 };
@@ -792,7 +861,11 @@ static int tsf_load_presets(tsf* res, struct tsf_hydra *hydra, unsigned int font
 				if (ppgen->genOper == GenKeyRange) { plokey = ppgen->genAmount.range.lo; phikey = ppgen->genAmount.range.hi; continue; }
 				if (ppgen->genOper == GenVelRange) { plovel = ppgen->genAmount.range.lo; phivel = ppgen->genAmount.range.hi; continue; }
 				if (ppgen->genOper != GenInstrument) continue;
-				if (ppgen->genAmount.wordAmount >= hydra->instNum) continue;
+				// watermelon-audio (REQ-048 S2): `>= instNum - 1`, no `>= instNum`. El instrumento w se
+				// lee con el w+1 que cierra sus bags (`pinst[1]`): apuntar al terminal EOI leia un
+				// registro mas alla de `insts`. Igual en el llenado, abajo, y en el lector de
+				// moduladores (`amount + 1 >= inst.count`), que replica este recorrido.
+				if (ppgen->genAmount.wordAmount >= hydra->instNum - 1) continue;
 				pinst = hydra->insts + ppgen->genAmount.wordAmount;
 				for (pibag = hydra->ibags + pinst->instBagNdx, pibagEnd = hydra->ibags + pinst[1].instBagNdx; pibag != pibagEnd; pibag++)
 				{
@@ -831,7 +904,7 @@ static int tsf_load_presets(tsf* res, struct tsf_hydra *hydra, unsigned int font
 				{
 					struct tsf_region instRegion;
 					tsf_u16 whichInst = ppgen->genAmount.wordAmount;
-					if (whichInst >= hydra->instNum) continue;
+					if (whichInst >= hydra->instNum - 1) continue; // watermelon-audio (REQ-048 S2): ver el conteo, arriba
 
 					tsf_region_clear(&instRegion, TSF_FALSE);
 					pinst = &hydra->insts[whichInst];
@@ -963,12 +1036,20 @@ static int tsf_decode_sf3_samples(const void* rawBuffer, float** pFloatBuffer, u
 		struct tsf_hydra_shdr *shdr = &hydra->shdrs[i];
 		if (shdr->sampleType & 0x30) // compression flags (sometimes Vorbis flag)
 		{
-			const tsf_u8 *pSmpl = smplBuffer + shdr->start, *pSmplEnd = smplBuffer + shdr->end;
-			if (pSmpl + 4 > pSmplEnd || !TSF_FourCCEquals(pSmpl, "OggS"))
+			const tsf_u8 *pSmpl, *pSmplEnd;
+			// watermelon-audio (REQ-048 S2, F6/F7 de S0): en SF3 `start`/`end` son BYTES de `smpl`, y
+			// nadie los acotaba. Un `end` mas alla del chunk le pasaba a stb_vorbis un buffer que no
+			// existe (F6, que se ve como un overflow de stb aunque la causa es esta), y un `start`
+			// fuera leia la marca OggS fuera del heap (F7). Un rango que sale del chunk rechaza el
+			// font; uno vacio, corto o al reves se saltea como antes (`pSmpl + 4 > pSmplEnd`), ahora
+			// en enteros y sin calcular un puntero fuera del buffer.
+			if (shdr->end > smplLength) { TSF_FREE(res); return 0; }
+			if (shdr->start > shdr->end || shdr->end - shdr->start < 4 || !TSF_FourCCEquals((smplBuffer + shdr->start), "OggS"))
 			{
 				shdr->start = shdr->end = shdr->startLoop = shdr->endLoop = 0;
 				continue;
 			}
+			pSmpl = smplBuffer + shdr->start; pSmplEnd = smplBuffer + shdr->end;
 
 			// Fix up sample indices in shdr (end index is set after decoding)
 			shdr->start = resNum;
@@ -980,22 +1061,39 @@ static int tsf_decode_sf3_samples(const void* rawBuffer, float** pFloatBuffer, u
 		}
 		else // raw PCM sample
 		{
-			float *out; short *in = (short*)smplBuffer + resNum, *inEnd; tsf_u32 oldResNum = resNum;
+			// watermelon-audio (REQ-048 S2, F8 de S0): el tramo de `smpl` se calcula en POSICIONES
+			// (shorts), no en punteros. Antes `in` salia de `smpl + resNum - (resNum - start)`: con un
+			// `start` mayor que lo ya decodificado la resta da la vuelta y `in` caia 4 GB antes del
+			// buffer (BUS/HBO/OOM). Ademas el tramo cerraba en `smplBuffer + smplLength` como `short*`:
+			// con `smpl` impar, que 2.2c vuelve cargable, el ultimo short leia un byte de mas.
+			float *out; const short *in; tsf_u32 smplShorts = smplLength / 2, inPos = resNum, inEnd, oldResNum = resNum, len;
 			if (is_sf3) // Fix up sample indices in shdr
 			{
-				tsf_u32 fix_offset = resNum - shdr->start;
-				in -= fix_offset;
+				tsf_u32 fix_offset;
+				// tsf supone que una muestra PCM de un SF3 empieza antes de lo ya decodificado (en un
+				// SF3 legitimo es el EOS con start 0, o datos que el Ogg previo expande); si no, la
+				// cuenta de abajo no tiene sentido y antes leia fuera del heap: se rechaza el font.
+				// Salvo el EOS que apunta al final de `smpl` (la convencion de GeneralUser,
+				// start = smplLength/2): no hay nada que convertir, y en un SF3 de muestras cortas,
+				// donde los encabezados Ogg pesan mas que lo decodificado, queda mas alla de resNum.
+				// Ninguna region lo referencia (sampleID < shdrNum - 1, tsf_hydra_valid).
+				if (shdr->start > resNum && i == shdrLast && shdr->start == smplShorts) continue;
+				if (shdr->start > resNum) { TSF_FREE(res); return 0; }
+				fix_offset = resNum - shdr->start;
+				inPos = shdr->start;
 				shdr->start = resNum;
 				shdr->end += fix_offset;
 				shdr->startLoop += fix_offset;
 				shdr->endLoop += fix_offset;
 			}
-			inEnd = in + ((shdr->end >= shdr->endLoop ? shdr->end : shdr->endLoop) - resNum);
-			if (i == shdrLast || (tsf_u8*)inEnd > (smplBuffer + smplLength)) inEnd = (short*)(smplBuffer + smplLength);
-			if (inEnd <= in) continue;
+			// El tramo cierra en el final de `smpl` si lo pasa (y el EOS, siempre), como antes; uno que
+			// empieza al final o despues no convierte nada. Sin sumar `inPos + len`, que da la vuelta.
+			len = (shdr->end >= shdr->endLoop ? shdr->end : shdr->endLoop) - resNum;
+			inEnd = (i == shdrLast || inPos >= smplShorts || len > smplShorts - inPos ? smplShorts : inPos + len);
+			if (inEnd <= inPos) continue;
 
 			// expand our output buffer if necessary then convert the PCM data from short to float
-			resNum += (tsf_u32)(inEnd - in);
+			resNum += inEnd - inPos;
 			if (resNum > resMax)
 			{
 				do { resMax += (resMax ? (resMax < 1048576 ? resMax : 1048576) : resInitial); } while (resNum > resMax);
@@ -1005,7 +1103,7 @@ static int tsf_decode_sf3_samples(const void* rawBuffer, float** pFloatBuffer, u
 			}
 
 			// Convert the samples from short to float
-			for (out = res + oldResNum; in < inEnd;)
+			for (out = res + oldResNum, in = (const short*)smplBuffer + inPos; inPos < inEnd; inPos++)
 				*(out++) = (float)(*(in++) / 32767.0);
 		}
 	}
@@ -1556,6 +1654,10 @@ TSFDEF tsf* tsf_load(struct tsf_stream* stream)
 	else if (!rawBuffer && !floatBuffer)
 	{
 		//if (e) *e = TSF_INVALID_NOSAMPLEDATA;
+	}
+	else if (!tsf_hydra_valid(&hydra))
+	{
+		// watermelon-audio (REQ-048 S2, AC-048.3): indices del hydra fuera de rango.
 	}
 	else
 	{
