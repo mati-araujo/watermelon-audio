@@ -227,6 +227,8 @@ target_compile_definitions(core_tests PRIVATE
     WMA_SF3_PCM_BASELINE="${CMAKE_CURRENT_SOURCE_DIR}/testdata/sf3-pcm-baseline/GeneralUser_GS.tsv"
     # REQ-048 S1 (AC-048.1) — el corpus hostil versionado (artefactos del fuzzer de S0).
     WMA_HOSTILE_TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata/hostile"
+    # REQ-048 S2 (2.2d) — el Ogg legitimo del control positivo del decoder, con su receta.
+    WMA_SF3_DECODER_CONTROL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata/sf3-decoder-control"
     # REQ-043 — los fixtures versionados del looper (glide-voz.*), de solo lectura, para el
     # test que entra por la C API. Mismo directorio que usa looper/tests.
     WMA_LOOPER_TESTDATA_DIR="${WMA_CPP_ROOT}/looper/tests/testdata")

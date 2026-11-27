@@ -14,3 +14,62 @@ F2  stb_F2_comment_list_len.ogg    268e49f37676a3031141a93ebaf9924b853414af9e4de
 F3  stb_F3_comment_len.ogg         abebc769eaa4f4175cf2f33ef3196123a45fc19325ad7478a99774ad951b843c  crash-021b9a9d8932807d949688d57739158243aecf02  ASan requested-allocation-size stb:3670       rechaza
 F4  stb_F4_deinit_null.ogg         7ea26e883034d8a892ddd6f6cc4d293ff7061c76b293a36fa482788fd979176f  crash-12e8ea347eb420bd8a80fc1364e03032a2652818  UBSan null load vorbis_deinit stb:4214         rechaza
 F5  stb_F5_lookup1_values.ogg      1c4f71b514ba830d5bdffcefbc51eb4776bb5dc070d26f34605c12fc5e97c2d6  crash-057e312e69499a075b5392b2f768330439ba471e  UBSan float-cast-overflow lookup1_values stb:1244  rechaza con el parche propio (sin el, el fork solo apaga UBSan)
+
+# --- REQ-048 S2: el corpus de tsf.h (F6-F10, AC-048.1 / AC-048.3 / AC-048.5) ---
+#
+# Artefactos del fuzzer de S0 sobre tsf_load_memory, uno por firma (los que S0 dejo en reps/), copiados
+# TAL CUAL, mas el reproductor de TinySoundFont #123 que genero el gen.cpp de S0 (MinimalSoundFont.h con
+# SampleID = 0x7FFF). Ninguno se escribio a mano. Los .sf3 son mutaciones de la semilla SF3 de S0 (un Ogg
+# de 8000 muestras por oggenc, envuelto con wrap_sf3); los .sf2, de las semillas de MinimalSoundFont.h.
+#
+# "hoy" = el tsf.h de la base de S2 (009671a3, igual al de S0), C++20, ASan+UBSan, Apple clang 21, medido el 27/11
+#         (las lineas son de ese tsf.h, las mismas que en S0).
+# "lo rechaza" = el primer chequeo de S2 que devuelve NULL. Que cada chequeo tiene al menos un archivo que
+#         lo vuelve rojo esta medido por mutacion en las Notas de la etapa S2.
+#
+# firma  archivo                              sha256                                                            artefacto de S0                                   hoy                                    lo rechaza (S2)
+F6   tsf_F6_ogg_end_past_smpl.sf3         c19c77e4ce753af0f57ac4f15706fafbbeaad4fc5d54d8aaf50bc24e0eb64145  crash-1a47ffeeec5408db46f19af0b67ed3ba82cfe31a  ASan HBO get8 stb_vorbis.c:1439        end de la muestra Ogg > smplLength
+F7   tsf_F7_ogg_start_past_smpl.sf3       3f824596e22a76e8b6b9224c4a855bcad64ffa5bad69e80b7596aceae3d8fbd2  crash-2593ac3f942734eed353ffaed68c11ba004d823a  ASan HBO tsf_decode_sf3_samples :967   end de la muestra Ogg > smplLength
+F7   tsf_F7_ogg_range_wild.sf3            52a26ecdc043ccda3b6c073b76935ad3ed2968f6dd2077a93737322da7d107dc  crash-03a1c7450ecf7ce1de14a613f0cf78e8e916743e  ASan BUS tsf_decode_sf3_samples :967   end de la muestra Ogg > smplLength
+F8   tsf_F8_pcm_start_wild.sf3            63a7fd9be1cd38a338490124df7946efb80c2228a8e35d3ba87684daaae516a9  crash-15125cbd72344d9ddf7c0e4c39fad76a6805b45c  ASan BUS tsf_decode_sf3_samples :1009  start PCM > lo decodificado (SF3)
+F8   tsf_F8_pcm_start_past_decoded.sf3    44c857b6b2258a7b83f9c5c31ac64fc07f84c6282d3777fe81721581c715ba5f  crash-18c210221b39143a4306e4b869140af14fef9149  ASan HBO (puntero salvaje) :1009       start PCM > lo decodificado (SF3)
+F8   tsf_F8_ogg_end_oom.sf3               f067391d87bd3bbf4d9597a374ccfa312bc738bf4a346f3fa3e951e6d5d62957  oom-0432797f2a7721239a9a5c787956a734b401f93f    ASan BUS :1009 (OOM :1003 en libFuzzer) end de la muestra Ogg > smplLength
+F9   tsf_F9_preset_bags_backwards.sf3     0fc9230e2cc003e961aeafc116676caa247ac2eea0488ca194c2398d1bdddfd2  crash-3aea25835fd1b8dbf40126a95c4b79911e71ff9c  ASan UAF tsf_load_presets :790         presetBagNdx que retrocede
+F9   tsf_F9_preset_bag_wild.sf2           f7b53159da75dedf09843309d1d97ce0b429839a1bfb3f48c02195bddc45a484  crash-6e225ba30bde2a14a96e2418fd9a382f6636e6d3  ASan BUS tsf_load_presets :790         presetBagNdx que retrocede
+F9   tsf_F9_preset_bag_past_pbag.sf3      deceebffd6d34fc37113cb2fff5d868d915426b4c73bd0da8d01aa2bfa65822e  crash-0fd9d748dfbdd1d7dd1a53d76983703c077432c3  ASan HBO tsf_load_presets :790         presetBagNdx que retrocede (y el EOP pasa pbag)
+F9   tsf_F9_pbag_gen_past_pgen.sf2        8e970164bf3ed28965041ebfd01ca1350808c606ff35dadefcc065e121255342  crash-d338da869653737e6cdc4e2e67cb195828651b5f  ASan HBO tsf_load_presets :792         el ultimo pbag cierra pasado pgen
+F9   tsf_F9_inst_bags_backwards.sf2       dc487fada2bfbe9183316352a0218ab59cc8b2a3dca40065782ef8a8585768cb  crash-57ad066fb78067200d19444fea00397fa8b95af7  ASan HBO tsf_load_presets :800         instBagNdx que retrocede
+F9   tsf_F9_ibag_gen_past_igen.sf2        71d0549c1d44eba0d073642818d52ed3999fcf8705bb1d13a60394c2024d5046  crash-2ba268554214eade07fdd4841aa4277b535e5d0e  ASan HBO tsf_load_presets :802         el ultimo ibag cierra pasado igen
+F10  tsf_F10_sampleid_past_shdr.sf2       79bd5a1bb383dceef473b97019b5b091e38ce7f29b4064e254619cf1777fb0d1  crash-24a17887361707a4116a9b5ba90bc59d11c3c412  ASan HBO tsf_load_presets :870         sampleID >= shdrNum - 1 (el EOS no es muestra)
+F10  tsf_F10_tsf123_sampleid.sf2          d6dbf1d527faebd5238468b2b430a2d5f7ee57dcb30fd2676872368f30c889f4  generated/repro_tsf123_sampleid.sf2 (gen.cpp)    ASan BUS tsf_load_presets :870         sampleID >= shdrNum - 1 (TinySoundFont #123)
+
+# --- REQ-048 S2: el fuzzing dirigido de los mutantes que S0 no aislaba (2.4) ---
+#
+# Seis chequeos de S2 tapan un over-read que se ve leyendo el codigo, pero ningun artefacto de S0 los
+# aislaba (los de S0 con esos defectos violan tambien otro chequeo). Se fuzzeo el tsf.h de S2 SIN ese
+# chequeo (un mutante), con las semillas de S0, las variantes legitimas de MINI-038 y este corpus,
+# libFuzzer de clang 18 en docker (req048-fuzz:clang18, ASan+UBSan+function). El artefacto que tumbo
+# al mutante se copio TAL CUAL. Son mutaciones de un .sf3 con un Ogg impar: el tsf.h de antes los
+# rechaza en el relleno RIFF (2.2c), antes del hydra; con 2.2c llegan y su chequeo es lo unico que
+# los para.
+#
+# "mutante" = el tsf.h de S2 menos ese chequeo, con el arnes de macOS (C++20, ASan+UBSan, Apple clang 21).
+# Los de M2, M7 y M11 salieron en modo fork (-ignore_timeouts: un timeout de stb_vorbis, fuera de S2,
+# cortaba la corrida normal). tsf_F9_eop_bag_past_pbag sale de riffpad-nopad.sf3 (el escritor que no
+# rellena): el tsf.h de antes lo carga, con el byte de mas del PCM impar (HBO :1009, el de M14).
+#
+# firma  archivo                              sha256                                                            artefacto (mutante)                               mutante                                lo rechaza (S2)
+F9   tsf_F9_pbag_gens_backwards.sf3       935abb91bdeb542d260db169ecfca6355681c2f2e08488c625cae30953d446f4  crash-608e8a275c76814b328fc119338f4fb72c00c46e (M3)  ASan HBO tsf_load_presets :861     el genNdx de un pbag que retrocede (pbag[0] 7662 > pbag[1] 0)
+F9   tsf_F9_inst_bag_past_ibag.sf3        d62b1d9aae0f0a2265a8ac1fcc1638b32290085012bf542ffcd2ab500782753c  crash-cb8cdfce71ba4491878009359f8024d49bbaabdb (M6)  ASan HBO tsf_hydra_valid :812      el EOI cierra pasado ibag (bag 5 >= ibagNum 2)
+F9   tsf_F9_eop_bag_past_pbag.sf3         701fca6b5e9a8e876d128801d3b74297b76aa7c6fdd2686bc5423c0cccb37902  crash-696d15c531d78df85fc68dc66427c8720ccee100 (M2)  ASan HBO tsf_hydra_valid :802      el EOP cierra en pbagNum o mas alla, con los presets en orden
+F9   tsf_F9_ibag_gens_backwards.sf3       910d3bbeede0d90588a356cbf47744363e6fc561b95300fc5ecc510d94c18eff  crash-bd85c9bca777b3732782d660612f357fae63a86f (M7)  ASan HBO tsf_load_presets :875     el genNdx de un ibag que retrocede (ibag[0] 11008 > ibag[1] 2)
+# El de M10 necesito un chunk del hydra de largo 0, que el fuzzer no arma a ciegas: salio de una semilla
+# LEGITIMA, seed_basic.sf2 de S0 con un `JUNK` vacio al principio de pdta (RIFF obliga a saltear lo que no
+# conoce: el font es el mismo), y un diccionario con "phdr", "inst" y cuatro ceros. Esta truncado (587 de
+# 668 bytes declarados): asi lo dejo el fuzzer. El tsf.h de antes lo rechaza sin leer fuera (presetNum = -1).
+F9   tsf_F9_empty_phdr.sf2               19d1187997f0cbb55c035b5ef68e239b83d750229624b912a8236a3aa11fda81  crash-c2680a927575717fe0e7e3cc08d511b0c7698f38 (M10) ASan HBO tsf_hydra_valid :798     phdr de largo 0 (no hay terminal EOP que leer)
+#
+# Este NO se rechaza, a proposito: un instrumento fuera de rango se saltea (lo hacia tsf con `>= instNum` y lo
+# hace el lector de moduladores), y S2 solo corrige el limite para que el terminal EOI no cuente. Carga con
+# 0 regiones (la semilla tiene 1); el test afirma eso.
+F9   tsf_F9_zone_inst_is_eoi.sf3          feb940d94db508bde0acf9ec52f3bf2bcedb0f5514dfd3be432c2329abf766cf  crash-6a03c4d1a1b4d240eca5f82e6718e6b955be1003 (M11) ASan UAF tsf_load_presets :870     carga sin la zona: su instrumento es el EOI (pgen[0] -> inst 1 = instNum - 1)

@@ -69,8 +69,11 @@
 #include <vector>
 
 #include <atomic>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 
 #if defined(_WIN32)
 #include <fcntl.h>
@@ -487,6 +490,184 @@ TEST_F(SoundFontLoadTest, AnOutOfRangePresetIndexIsStillRejected) {
     EXPECT_FALSE(mManager.getPresetKeyRange(-1, lo, hi));
     EXPECT_EQ(lo, -1) << "un rechazo no puede tocar los out-params";
     EXPECT_EQ(hi, -1);
+}
+
+// ===========================================================================
+// REQ-048 S2 — un font hostil se rechaza y el anterior sigue sonando (AC-048.7)
+// ===========================================================================
+
+namespace {
+
+/** Una nota de 512 frames desde silencio: el observable de "suena igual", bit a bit. */
+std::vector<float> renderOneNote(tsf* sf) {
+    tsf_reset(sf);
+    tsf_note_on(sf, 0, 60, 1.0f);
+    std::vector<float> out(512 * 2, 0.0f);
+    tsf_render_float(sf, out.data(), 512, 0);
+    tsf_reset(sf);
+    return out;
+}
+
+/** Un archivo del corpus hostil (`testdata/hostile/`, artefactos del fuzzer de REQ-048 S0). */
+std::vector<uint8_t> readHostile(const char* name) {
+    std::ifstream in(std::string(WMA_HOSTILE_TESTDATA_DIR) + "/" + name, std::ios::binary);
+    if (!in) return {};
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+}  // namespace
+
+/**
+ * AC-048.7 — con un font cargado, uno hostil devuelve error y el anterior queda: el mismo puntero, la
+ * misma tasa, los mismos presets, y la misma nota bit a bit. Por `loadFromPath` (el camino de
+ * NoisyPad al importar o descargar) y por `loadFromMemory`, con dos artefactos de S0: uno que rechaza
+ * la validación del hydra (#123) y uno que rechaza la decodificación del SF3 (F6), después de haber
+ * empezado a armar el buffer de muestras.
+ *
+ * Bug que atrapa: un cargador que suelta o reconfigura el font vivo ANTES de saber si el nuevo
+ * parsea (un `unload()` o un `tsf_set_output` adelantado), o que publica un font a medias. Y, bajo
+ * ASan, el rechazo mismo: con el `tsf.h` de antes los dos archivos leen fuera del heap.
+ */
+TEST_F(SoundFontLoadTest, AHostileFontIsRejectedAndThePreviousOneKeepsPlaying) {
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 44100));
+    tsf* const before = mManager.getActiveSF();
+    ASSERT_NE(before, nullptr);
+    const std::vector<float> reference = renderOneNote(before);
+    float peak = 0.0f;
+    for (float s : reference) peak = std::max(peak, std::fabs(s));
+    ASSERT_GT(peak, 0.0f) << "la nota de referencia es silencio: no distinguiría nada";
+
+    for (const char* name : {"tsf_F10_tsf123_sampleid.sf2", "tsf_F6_ogg_end_past_smpl.sf3"}) {
+        SCOPED_TRACE(name);
+        const std::vector<uint8_t> hostile = readHostile(name);
+        ASSERT_FALSE(hostile.empty()) << "falta " << name << " en " << WMA_HOSTILE_TESTDATA_DIR;
+        TempSf2File file(hostile);
+        ASSERT_GE(file.fd(), 0);
+
+        EXPECT_FALSE(mManager.loadFromPath(file.path(), 48000));
+        EXPECT_FALSE(mManager.loadFromMemory(hostile.data(), static_cast<int>(hostile.size()), 48000));
+
+        ASSERT_TRUE(mManager.isLoaded()) << "el rechazo soltó el font vivo";
+        EXPECT_EQ(mManager.getActiveSF(), before) << "el rechazo cambió el font vivo";
+        EXPECT_EQ(mManager.getSampleRate(), 44100) << "el rechazo reconfiguró la tasa";
+        EXPECT_EQ(mManager.getPresetCount(), 1);
+        EXPECT_EQ(renderOneNote(mManager.getActiveSF()), reference) << "el font anterior ya no suena igual";
+    }
+}
+
+// ===========================================================================
+// REQ-048 S2 (tarea 2.2c) — el byte de relleno RIFF de un chunk impar
+// ===========================================================================
+//
+// RIFF rellena con un byte en cero un chunk de largo impar, y tsf no lo saltaba: tras el chunk, el
+// encabezado siguiente se leía corrido un byte y la carga se cortaba sin `pdta`. Así se rechazaba
+// un `.sf3` legítimo cuya muestra Ogg medía un número impar de bytes (hallazgo de MINI-038, medido
+// en REQ-048 S1). Un `.sf2` no puede tener un `smpl` impar, así que acá el chunk impar es un `JUNK`
+// de 3 bytes: RIFF obliga a saltear los chunks que no se conocen, y el font que lo lleva es el
+// mismo font. Lo que se afirma es eso: carga, y la nota sale bit a bit igual que sin el chunk.
+// El caso real (un Ogg impar) vive con el control positivo del decoder (2.2d).
+
+namespace {
+
+uint32_t rd32(const std::vector<uint8_t>& v, size_t at) {
+    return static_cast<uint32_t>(v[at]) | (static_cast<uint32_t>(v[at + 1]) << 8) |
+           (static_cast<uint32_t>(v[at + 2]) << 16) | (static_cast<uint32_t>(v[at + 3]) << 24);
+}
+void wr32(std::vector<uint8_t>& v, size_t at, uint32_t x) {
+    for (int i = 0; i < 4; ++i) v[at + i] = static_cast<uint8_t>(x >> (8 * i));
+}
+
+/** Offset del `LIST <type>` de primer nivel, o `npos`. */
+size_t findList(const std::vector<uint8_t>& sf2, const char* type) {
+    size_t at = 12;
+    while (at + 12 <= sf2.size()) {
+        const uint32_t size = rd32(sf2, at + 4);
+        if (std::memcmp(&sf2[at], "LIST", 4) == 0 && std::memcmp(&sf2[at + 8], type, 4) == 0) return at;
+        at += 8 + size + (size & 1);
+    }
+    return std::string::npos;
+}
+
+/** Un `JUNK` de 3 bytes, con su byte de relleno o (un escritor que no rellena) sin él. */
+std::vector<uint8_t> oddJunkChunk(bool padded) {
+    std::vector<uint8_t> c = {'J', 'U', 'N', 'K', 3, 0, 0, 0, 'a', 'b', 'c'};
+    if (padded) c.push_back(0);
+    return c;
+}
+
+/** Mete `chunk` en el `LIST <type>`, al principio (tras el tipo) o al final, y corrige los largos. */
+std::vector<uint8_t> withChunkInList(std::vector<uint8_t> sf2, const char* type, bool atEnd,
+                                     const std::vector<uint8_t>& chunk) {
+    const size_t list = findList(sf2, type);
+    if (list == std::string::npos) return {};
+    const uint32_t listSize = rd32(sf2, list + 4);
+    const size_t at = atEnd ? list + 8 + listSize : list + 12;
+    sf2.insert(sf2.begin() + static_cast<std::ptrdiff_t>(at), chunk.begin(), chunk.end());
+    wr32(sf2, list + 4, listSize + static_cast<uint32_t>(chunk.size()));
+    wr32(sf2, 4, rd32(sf2, 4) + static_cast<uint32_t>(chunk.size()));
+    return sf2;
+}
+
+/** Carga `sf2` y devuelve su nota, o vacío si no cargó. */
+std::vector<float> loadAndRender(const std::vector<uint8_t>& sf2) {
+    tsf* sf = tsf_load_memory(sf2.data(), static_cast<int>(sf2.size()));
+    if (!sf) return {};
+    tsf_set_output(sf, TSF_STEREO_INTERLEAVED, 44100, 0.0f);
+    std::vector<float> out = renderOneNote(sf);
+    tsf_close(sf);
+    return out;
+}
+
+}  // namespace
+
+/**
+ * AC-048.4 (2.2c).
+ * La forma de MINI-038: el chunk impar es el último del `LIST sdta`, y su relleno es el último byte
+ * del LIST. Bug que atrapa: tsf que no consume el relleno, lee el `LIST pdta` corrido un byte y
+ * devuelve NULL (rojo con el `tsf.h` de antes).
+ */
+TEST(SoundFontRiffPadding, AnOddChunkClosingSdtaWithItsPadByteLoadsTheSameFont) {
+    const std::vector<uint8_t> plain = makeMinimalSoundFont();
+    const std::vector<uint8_t> odd = withChunkInList(plain, "sdta", /*atEnd=*/true, oddJunkChunk(true));
+    ASSERT_FALSE(odd.empty());
+    const std::vector<float> reference = loadAndRender(plain);
+    ASSERT_FALSE(reference.empty()) << "el font de base no carga: el fixture está mal";
+
+    EXPECT_EQ(loadAndRender(odd), reference);
+}
+
+/**
+ * AC-048.4 (2.2c).
+ * El chunk impar con un hermano detrás: el primer chunk del `LIST pdta`, antes de `phdr`. Bug que
+ * atrapa: tsf que lee el id del hermano empezando por el relleno (un 0, id inválido) y corta el
+ * hydra; o un salto que se come un byte de más.
+ */
+TEST(SoundFontRiffPadding, AnOddChunkBeforeTheHydraWithItsPadByteLoadsTheSameFont) {
+    const std::vector<uint8_t> plain = makeMinimalSoundFont();
+    const std::vector<uint8_t> odd = withChunkInList(plain, "pdta", /*atEnd=*/false, oddJunkChunk(true));
+    ASSERT_FALSE(odd.empty());
+    const std::vector<float> reference = loadAndRender(plain);
+    ASSERT_FALSE(reference.empty()) << "el font de base no carga: el fixture está mal";
+
+    EXPECT_EQ(loadAndRender(odd), reference);
+}
+
+/**
+ * AC-048.4 (2.2c).
+ * Un escritor que NO rellena: el chunk impar cierra el `LIST sdta`, que queda impar y sin relleno,
+ * y el `LIST pdta` viene pegado. Esto el `tsf.h` de antes lo cargaba (verde antes y después), y
+ * tiene que seguir cargando. Bug que atrapa: un arreglo de 2.2c que salta un byte a ciegas tras todo
+ * chunk impar, o que no mira si al padre le quedan bytes, y se come la `L` del `LIST` siguiente.
+ */
+TEST(SoundFontRiffPadding, AnOddChunkFromAWriterThatDoesNotPadStillLoadsTheSameFont) {
+    const std::vector<uint8_t> plain = makeMinimalSoundFont();
+    const std::vector<uint8_t> odd = withChunkInList(plain, "sdta", /*atEnd=*/true, oddJunkChunk(false));
+    ASSERT_FALSE(odd.empty());
+    ASSERT_EQ(rd32(odd, findList(odd, "sdta") + 4) % 2, 1u) << "el LIST sdta tiene que quedar impar";
+    const std::vector<float> reference = loadAndRender(plain);
+    ASSERT_FALSE(reference.empty()) << "el font de base no carga: el fixture está mal";
+
+    EXPECT_EQ(loadAndRender(odd), reference);
 }
 
 }  // namespace wma_test
