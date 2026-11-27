@@ -9,8 +9,14 @@
  * 29/09): la evidencia esta en las Notas de la etapa S1.
  *
  * Lo que afirma solo tiene sentido bajo ASan+UBSan con `halt_on_error` (la Verification de S1 y
- * el job `cpp-tests-asan`): ahi un over-read o un cast UB TUMBA el test. Sin sanitizers, F1-F3 en
- * 1.22 piden una asignacion gigante que falla y el decoder igual devuelve NULL.
+ * el job `cpp-tests-asan`): ahi un over-read o un cast UB TUMBA el test. 🔴 F5 es un cast UB
+ * (`float-cast-overflow`), que GCC NO incluye en `-fsanitize=undefined`: el job lo pide aparte.
+ * Sin sanitizers, F1-F3 en 1.22 piden una asignacion gigante que falla y el decoder igual
+ * devuelve NULL, y F5 pasa.
+ *
+ * Lo que NO cubre: un decoder que rechaza TODO Ogg pasa estos tests. El control positivo (un
+ * Vorbis legitimo que decodifica) es la linea de base de GeneralUser (`test_sf3_decode_baseline`),
+ * que sin el font sale SKIPPED; uno que corra en el CI queda para S2.
  *
  * Dos caminos por archivo:
  *  - el decoder solo (`stb_vorbis_open_memory`), que es donde viven los defectos;
@@ -144,8 +150,9 @@ TEST_P(HostileCorpus, LoadingItAsAnSf3FailsCleanly) {
     const std::vector<uint8_t> ogg = readFile(s.file);
     ASSERT_FALSE(ogg.empty()) << "falta " << s.file;
 
-    // Control: con la marca OggS rota, tsf saltea la muestra (`tsf_decode_sf3_samples`) y el font
-    // CARGA. Si no cargara, el envoltorio estaria mal y el rechazo de abajo no probaria nada.
+    // Control: con la marca OggS rota, tsf no la decodifica como Vorbis y el font CARGA (el
+    // registro terminal EOS convierte el `smpl` entero a PCM de 16 bits, `tsf_decode_sf3_samples`).
+    // Si no cargara, el envoltorio estaria mal y el rechazo de abajo no probaria nada.
     std::vector<uint8_t> notOgg = ogg;
     notOgg[0] = 'X';
     const std::vector<uint8_t> control = wrapAsSf3(notOgg);

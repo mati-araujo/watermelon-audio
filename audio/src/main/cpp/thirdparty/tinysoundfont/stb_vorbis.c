@@ -1313,15 +1313,14 @@ static int vorbis_validate(uint8 *data)
 //
 // watermelon-audio (REQ-048): el fork apagaba aca el reporte de UBSan
 // (STB_NO_SANITIZE("float-cast-overflow"), upstream nothings/stb#1168) en vez
-// de arreglar la entrada que lo dispara. Dos casos, los dos con un setup
-// hostil: (a) dim == 0 (o entries <= 0) hace que la division de inf/nan antes
-// del primer cast; (b) con dim grande, pow(r+1, dim) da inf y el cast (int)
-// de la comparacion es UB. (a) se rechaza antes de la cuenta (el llamador lo
-// trata como VORBIS_invalid_setup). (b) compara en punto flotante, sin el
-// cast: floor(x) es entero, asi que donde el cast estaba definido el
-// resultado es el mismo, y donde no, inf > entries rechaza el codebook. Con
-// entries < 2^24 y dim >= 1, el primer cast queda acotado. Se quita el
-// silenciador para que UBSan vea cualquier otro caso.
+// de arreglar la entrada que lo dispara: con dim grande (un setup hostil),
+// pow(r+1, dim) da inf y el cast (int) de la comparacion es UB. Las
+// comparaciones van en punto flotante, sin el cast: floor(x) es entero, asi
+// que donde el cast estaba definido el resultado es el mismo, y donde no, la
+// cuenta queda definida (devuelve la raiz exacta, o -1). La guarda de
+// entries/dim es defensiva: start_decoder ya rechaza dim == 0 con entries,
+// y con ella el primer cast queda acotado (entries < 2^24, dim >= 1). Se
+// quita el silenciador para que UBSan vea cualquier otro caso.
 static int lookup1_values(int entries, int dim)
 {
    int r;
